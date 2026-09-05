@@ -177,52 +177,68 @@ async def run_in_session(
     """Run a command in the session, composing through bwrap when available."""
     inner_argv = session.build_inner_argv(command)
 
-    if session.sandboxed:
-        payload = await _run_via_bwrap(
-            ctx,
-            inner_argv,
-            timeout_seconds=max(timeout_seconds, 1) + 30,
-            network=network,
-            persist=persist,
-            layer_id=layer_id,
-        )
-        if "error" in payload and payload["error"]:
-            return {
-                "error": f"sandbox execution failed: {payload['error']}",
+    try:
+        if session.sandboxed:
+            payload = await _run_via_bwrap(
+                ctx,
+                inner_argv,
+                timeout_seconds=max(timeout_seconds, 1) + 30,
+                network=network,
+                persist=persist,
+                layer_id=layer_id,
+            )
+            if "error" in payload and payload["error"]:
+                # The sandbox itself reported a failure (e.g. bwrap missing on
+                # this host): surface it with the sandbox stamp and any reason
+                # the child provided so the model can relay the fix.
+                error_result: dict[str, Any] = {
+                    "error": f"sandbox execution failed: {payload['error']}",
+                    "sandboxed": True,
+                }
+                if payload.get("missing"):
+                    error_result["missing"] = payload["missing"]
+                    error_result["error"] += (
+                        ". Missing host prerequisites: " + "; ".join(payload["missing"])
+                    )
+                return error_result
+            stdout_body, rc = _parse_output(payload.get("stdout_raw", ""), session.sentinel)
+            result = {
+                "stdout": stdout_body,
+                "stderr": payload.get("stderr", ""),
+                "return_code": payload.get("return_code", rc if rc is not None else 0),
+                "timed_out": payload.get("timed_out", False),
+                "truncated": payload.get("truncated", False),
                 "sandboxed": True,
+                "backend": payload.get("backend"),
+                "layer_id": payload.get("layer_id"),
+                "persistence": payload.get("persistence"),
             }
-        stdout_body, rc = _parse_output(payload.get("stdout_raw", ""), session.sentinel)
-        result = {
-            "stdout": stdout_body,
-            "stderr": payload.get("stderr", ""),
-            "return_code": payload.get("return_code", rc if rc is not None else 0),
-            "timed_out": payload.get("timed_out", False),
-            "truncated": payload.get("truncated", False),
-            "sandboxed": True,
-            "backend": payload.get("backend"),
-            "layer_id": payload.get("layer_id"),
-            "persistence": payload.get("persistence"),
-        }
-        if payload.get("degraded"):
-            result["degraded"] = True
-            result["note"] = payload.get("note")
-    else:
-        try:
+            if payload.get("degraded"):
+                result["degraded"] = True
+                result["note"] = payload.get("note")
+        else:
             proc = await _run_process(inner_argv, timeout_seconds=timeout_seconds)
-        except Exception as exc:
-            return {"error": f"bash execution failed: {exc}", "sandboxed": False}
-        stdout_body, rc = _parse_output(proc["stdout_raw"], session.sentinel)
-        if rc is None:
-            # No rc marker parsed (e.g. truncated output or timeout): fall
-            # back to the process exit code rather than assuming success.
-            rc = proc.get("process_rc")
-        result = {
-            "stdout": stdout_body,
-            "stderr": proc["stderr"],
-            "return_code": rc if rc is not None else 0,
-            "timed_out": proc["timed_out"],
-            "truncated": proc["truncated"],
-            "sandboxed": False,
+            stdout_body, rc = _parse_output(proc["stdout_raw"], session.sentinel)
+            if rc is None:
+                # No rc marker parsed (e.g. truncated output or timeout): fall
+                # back to the process exit code rather than assuming success.
+                rc = proc.get("process_rc")
+            result = {
+                "stdout": stdout_body,
+                "stderr": proc["stderr"],
+                "return_code": rc if rc is not None else 0,
+                "timed_out": proc["timed_out"],
+                "truncated": proc["truncated"],
+                "sandboxed": False,
+            }
+    except Exception as exc:
+        # Covers both the sandbox path (bwrap_run raised through the
+        # passthrough, e.g. bwrap missing on the host) and direct host
+        # execution. Never fail silently: the stamp tells the model whether
+        # the failure happened inside or outside the sandbox.
+        return {
+            "error": f"bash execution failed: {exc}",
+            "sandboxed": session.sandboxed,
         }
 
     _append_log(session.log_path, command, result)

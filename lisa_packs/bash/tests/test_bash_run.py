@@ -144,3 +144,92 @@ async def test_output_without_trailing_newline_preserved(
     assert result.error == ""
     assert result.output_text == "no-trailing-newline"
     assert result.output_json["return_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_bwrap_binary_sandbox_error_surfaces_missing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Regression: pack installed but bwrap binary absent must fail loudly.
+
+    The 2026-09-05 tumbleweed3 incident: ``_sandbox_available()`` checks pack
+    registration, not the host binary, so the session routed through
+    ``bwrap_run``, which errored - and the model only saw an opaque failure
+    with a bare ``sandboxed`` stamp and no remediation. The error result must
+    now carry the missing prerequisites plus the remediation doc.
+    """
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
+    monkeypatch.setattr(
+        bash_run,
+        "_sandbox_degraded",
+        lambda: ["bubblewrap (bwrap) binary not found on PATH"],
+    )
+
+    async def _fake_run_in_session(ctx, session, command, **kwargs):
+        return {
+            "error": (
+                "sandbox execution failed: bubblewrap sandbox is not available: "
+                "bubblewrap (bwrap) binary not found on PATH"
+            ),
+            "sandboxed": True,
+            "missing": ["bubblewrap (bwrap) binary not found on PATH"],
+        }
+
+    monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
+    result = await bash_run.execute(_ctx(tmp_path))
+    assert "sandbox execution failed" in result.error
+    assert result.output_json["sandboxed"] is True
+    assert "bubblewrap" in " ".join(result.output_json["missing"])
+    assert "zypper install bubblewrap" in result.output_json["doc"]
+
+
+@pytest.mark.asyncio
+async def test_missing_bwrap_binary_stamps_degraded_on_success(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Registered-but-broken sandbox flags every successful result degraded."""
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
+    monkeypatch.setattr(
+        bash_run,
+        "_sandbox_degraded",
+        lambda: ["bubblewrap (bwrap) binary not found on PATH"],
+    )
+
+    async def _fake_run_in_session(ctx, session, command, **kwargs):
+        return {
+            "stdout": "ok",
+            "stderr": "",
+            "return_code": 0,
+            "timed_out": False,
+            "truncated": False,
+            "sandboxed": True,
+            "backend": "tmpfs",
+            "persistence": "ephemeral",
+        }
+
+    monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
+    result = await bash_run.execute(_ctx(tmp_path))
+    assert result.error == ""
+    assert result.output_json["sandboxed"] is True
+    assert result.output_json["degraded"] is True
+    assert "bubblewrap" in result.output_json["note"]
+
+
+@pytest.mark.asyncio
+async def test_executor_exception_stamps_truthful_sandboxed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A raised (rather than error-result) sandbox failure stamps sandboxed=True."""
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_degraded", lambda: [])
+
+    async def _raise_run_in_session(ctx, session, command, **kwargs):
+        raise RuntimeError("bwrap_run blew up")
+
+    monkeypatch.setattr(bash_run, "run_in_session", _raise_run_in_session)
+    result = await bash_run.execute(_ctx(tmp_path))
+    assert result.error
+    assert result.output_json["sandboxed"] is True

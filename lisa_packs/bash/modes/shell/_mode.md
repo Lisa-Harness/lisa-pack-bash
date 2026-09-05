@@ -43,6 +43,13 @@ session.
   network access.
 - `sandboxed: false` means the command ran directly on the host with no
   isolation. Surface this to the user when you see it.
+- If a call **errors** with "sandbox execution failed" or the result carries
+  `missing` / `degraded`, the sandbox itself could not run on this host
+  (e.g. the `bwrap` binary is absent even though the pack is installed, or
+  user namespaces are disabled). Read the `missing` list and the remediation
+  doc, tell the user exactly what to install or enable, and do NOT keep
+  retrying the command — it fails deliberately rather than running silently
+  without isolation.
 
 ## Practices
 

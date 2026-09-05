@@ -56,6 +56,25 @@ def _sandbox_available() -> bool:
     return "bwrap_run" in get_tool_catalog()
 
 
+def _sandbox_degraded() -> list[str]:
+    """Report sandbox gaps when the pack is registered but the host cannot run it.
+
+    Returns a list of reasons. Empty means fully functional; an empty list when
+    ``_sandbox_available()`` is False means the bwrap pack itself is missing.
+    Probing a real namespaced run here would be redundant - ``bwrap_run``
+    re-probes on every call and reports failures explicitly (never silently).
+    """
+    if not _sandbox_available():
+        return []
+    try:
+        from lisa_packs.bwrap.probe import bwrap_binary
+    except Exception:  # pragma: no cover - bwrap pack always present when registered
+        return []
+    if bwrap_binary() is None:
+        return ["bubblewrap (bwrap) binary not found on PATH"]
+    return []
+
+
 class BashSession:
     """One Lisa session's shell: priming, logging, and command execution."""
 

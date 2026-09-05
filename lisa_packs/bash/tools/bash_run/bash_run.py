@@ -7,7 +7,12 @@ from pydantic import BaseModel, Field
 
 from lisa_packs.bash import read_authored_text
 from lisa_packs.bash.executor import run_in_session
-from lisa_packs.bash.session import _sandbox_available, bash_available, resolve_or_create_session
+from lisa_packs.bash.session import (
+    _sandbox_available,
+    _sandbox_degraded,
+    bash_available,
+    resolve_or_create_session,
+)
 
 TOOL_ID = "bash_run"
 
@@ -48,10 +53,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         )
 
     sandboxed = _sandbox_available()
+    degraded_reasons = _sandbox_degraded() if sandboxed else []
     session = resolve_or_create_session(ctx, sandboxed=sandboxed)
-    degraded_doc = (
-        read_authored_text("prompts/bash_no_sandbox.md") if not sandboxed else ""
-    )
+    degraded_doc = ""
+    if not sandboxed:
+        degraded_doc = read_authored_text("prompts/bash_no_sandbox.md")
+    elif degraded_reasons:
+        degraded_doc = read_authored_text("prompts/bwrap_missing.md")
 
     try:
         result = await run_in_session(
@@ -64,13 +72,28 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             layer_id=params.layer_id,
         )
     except Exception as exc:
-        return ToolResult(tool_id=TOOL_ID, error=f"bash_run failed: {exc}")
+        return ToolResult(
+            tool_id=TOOL_ID,
+            error=f"bash_run failed: {exc}",
+            output_json={
+                "sandboxed": sandboxed,
+                "missing": degraded_reasons,
+                **({"doc": degraded_doc} if degraded_doc else {}),
+            },
+        )
 
     if result.get("error"):
+        output_json = {"sandboxed": result.get("sandboxed", sandboxed)}
+        if result.get("missing"):
+            output_json["missing"] = result["missing"]
+        elif degraded_reasons:
+            output_json["missing"] = degraded_reasons
+        if degraded_doc:
+            output_json["doc"] = degraded_doc
         return ToolResult(
             tool_id=TOOL_ID,
             error=str(result["error"]),
-            output_json={"sandboxed": result.get("sandboxed", sandboxed)},
+            output_json=output_json,
         )
 
     output_json = {
@@ -92,6 +115,17 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         output_json["note"] = (
             "bwrap pack not installed: running unsandboxed on the host. "
             "See sandboxing_degraded.md to enable the sandbox."
+        )
+    elif degraded_reasons:
+        # Pack registered but host prerequisites missing: surface loudly on
+        # every result, never silently. bwrap_run re-probes per call and
+        # reports hard failures explicitly; this is the persistent heads-up.
+        output_json["degraded"] = True
+        output_json["sandbox_missing"] = degraded_reasons
+        output_json["note"] = (
+            "Sandbox prerequisites missing on this host: "
+            + "; ".join(degraded_reasons)
+            + ". See bwrap_missing.md to fix it."
         )
 
     return ToolResult(
