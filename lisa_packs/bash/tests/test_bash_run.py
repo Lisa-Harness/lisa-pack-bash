@@ -105,3 +105,42 @@ async def test_invalid_params_rejected(tmp_path: Path) -> None:
     ctx.parameters = {"command": ""}  # violates min_length
     result = await bash_run.execute(ctx)
     assert "Invalid parameters" in result.error
+
+
+@pytest.mark.asyncio
+async def test_rc_recovers_truthful_exit_code(monkeypatch, tmp_path: Path) -> None:
+    """Regression: failing commands must surface their real exit code.
+
+    The rc marker is emitted by the wrapped command (prompts never render
+    under ``bash -c``), and the executor must not mask a missing marker with
+    a fallback 0.
+    """
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
+
+    for command, expected_rc in (
+        ("false", 1),
+        ("exit 7", 7),
+        ("printf 'x'; exit 3", 3),
+    ):
+        ctx = _ctx(tmp_path, command=command)
+        result = await bash_run.execute(ctx)
+        assert result.error == ""
+        assert result.output_json["return_code"] == expected_rc, (
+            f"{command!r}: expected rc={expected_rc}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_output_without_trailing_newline_preserved(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The rc marker must stay on its own line; final output line survives."""
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
+
+    ctx = _ctx(tmp_path, command="printf 'no-trailing-newline'")
+    result = await bash_run.execute(ctx)
+    assert result.error == ""
+    assert result.output_text == "no-trailing-newline"
+    assert result.output_json["return_code"] == 0

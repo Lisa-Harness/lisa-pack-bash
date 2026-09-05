@@ -89,20 +89,30 @@ class BashSession:
     def build_inner_argv(self, command: str) -> list[str]:
         """Build the bash argv that sources the rc and runs the command.
 
-        Uses ``--rcfile`` so the priming profile is applied deterministically;
-        state (cwd, env) persists by the model exporting/changing only what it
-        re-declares in each command, while the log captures everything.
+        Uses ``--rcfile`` so the priming profile (env hygiene, locale, log
+        path) is applied deterministically. Under ``bash -c`` prompts never
+        render, so the rc's PS1/PROMPT_COMMAND sentinel cannot fire on its
+        own; the command is therefore wrapped to emit the rc marker
+        explicitly and exit with the command's status so the executor can
+        recover a truthful return code.
         """
         self.ensure_primed()
         rc_path = self.priming.rc_path
+        marker = f"{self.sentinel.strip()}rc="
+        wrapped = (
+            f"{command}\n"
+            # Leading \n keeps the marker on its own line even when the
+            # command's output has no trailing newline, so the parser never
+            # concatenates (and drops) the final output line.
+            f'__lisa_rc=$?; printf \'\\n%s\\n\' "{marker}$__lisa_rc"; exit "$__lisa_rc"'
+        )
         return [
             _BASH_BIN,
             "--noprofile",
             "--rcfile",
             str(rc_path),
-            "-i",
             "-c",
-            command,
+            wrapped,
         ]
 
 

@@ -107,6 +107,7 @@ async def _run_process(argv: list[str], *, timeout_seconds: int) -> dict[str, An
         "stderr": stderr.decode("utf-8", errors="replace"),
         "timed_out": timed_out,
         "truncated": stdout_over or stderr_over,
+        "process_rc": process.returncode,
     }
 
 
@@ -211,6 +212,10 @@ async def run_in_session(
         except Exception as exc:
             return {"error": f"bash execution failed: {exc}", "sandboxed": False}
         stdout_body, rc = _parse_output(proc["stdout_raw"], session.sentinel)
+        if rc is None:
+            # No rc marker parsed (e.g. truncated output or timeout): fall
+            # back to the process exit code rather than assuming success.
+            rc = proc.get("process_rc")
         result = {
             "stdout": stdout_body,
             "stderr": proc["stderr"],
