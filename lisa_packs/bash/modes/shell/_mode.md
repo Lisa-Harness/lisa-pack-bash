@@ -2,12 +2,14 @@
 mode_id: shell
 mode_provider_id: lisa-pack-bash
 mode_kind: action
+routable: true
+priority: 5
+command_pattern: "^(?:/)?shell(?:[\\s,:;]+(?P<query>.+))?$"
 description: "Shell execution for command-line tasks via a persistent bash session."
 routing_intent_tags: [shell, execute, terminal]
 routing_intent_keywords:
   shell: [shell, bash, command, terminal, run, execute, cli]
 satisfies_intents: [shell, execute]
-priority: 5
 allowed_tool_ids: [bash_run]
 ---
 
