@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lisa_packs*", "lisa_packs.bash*"]
+
+[tool.setuptools.package-data]
+"lisa_packs" = ["*"]
+"lisa_packs.bash" = ["tools/**/*.yml", "content/**/*.md", "content/**/*.tmpl", "modes/**/*.md"]
+
+[project]
+name = "lisa-pack-bash"
+version = "0.1.0"
+description = "Shell execution capability for Lisa - persistent, agent-optimized bash session"
+requires-python = ">=3.11"
+dependencies = ["lisa-kernel", "lisa-sdk"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["lisa_packs/bash/tests"]
+markers = [
+    "live: runs a real bash session and exercises sandbox composition",
+]
+
+[project.entry-points."lisa.extensions.content_roots"]
+bash = "lisa_packs.bash:get_content_root"

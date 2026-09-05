@@ -1,0 +1,35 @@
+#!/bin/bash
+# Lisa agent-optimized bash session rc.
+# Rendered per session by lisa_packs.bash.priming; not for interactive human use.
+# Placeholders: %%SENTINEL%%, %%LOG_PATH%%, %%LANG%%
+
+# Disable history and history expansion for determinism.
+set +H
+unset HISTFILE
+HISTSIZE=0
+HISTFILESIZE=0
+
+# Encoding / locale: deterministic UTF-8 output for the model.
+export LANG="%%LANG%%"
+export LC_ALL="%%LANG%%"
+export LC_CTYPE="%%LANG%%"
+
+# Terminal hygiene: dumb terminal, no color, no pager surprises.
+export TERM=dumb
+export NO_COLOR=1
+export PAGER=cat
+export GIT_PAGER=cat
+export MANPAGER=cat
+
+# Predictable, machine-readable prompt = unique per-session sentinel.
+# The model/parser keys off this sentinel to demarcate command boundaries.
+export PS1="%%SENTINEL%%"
+export PS2=""
+export PS4="+ "
+
+# After every command: print return code + sentinel on its own line so the
+# handler can parse output vs prompt and recover the exit status.
+PROMPT_COMMAND='__rc=$?; echo "%%SENTINEL%%rc=${__rc}"'
+
+# Audit trail: user-visible session log (tee-by-default happens host-side).
+export LISA_SESSION_LOG="%%LOG_PATH%%"
