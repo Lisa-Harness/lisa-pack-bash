@@ -10,21 +10,36 @@ host and every result is stamped ``sandboxed: false`` (visible, not silent).
 from __future__ import annotations
 
 import hashlib
-import shlex
+import json
+import logging
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash.priming import SessionPriming
 
-__all__ = ["BashSession", "SessionResult", "resolve_or_create_session", "bash_available"]
+__all__ = [
+    "SANDBOX_FACTS_DIRNAME",
+    "BashSession",
+    "SessionResult",
+    "bash_available",
+    "resolve_or_create_session",
+]
+
+logger = logging.getLogger(__name__)
 
 _BASH_BIN = "bash"
-_SESSIONS: dict[str, "BashSession"] = {}
+_SESSIONS: dict[str, BashSession] = {}
 
 # Commands composed through bwrap get these forwarded flags by default.
 _DEFAULT_BWRAP_TIMEOUT = 120
+
+#: Subdirectory of the host data dir where the pack publishes its per-session
+#: sandbox *containment fact* for the host approval engine. The pack reports
+#: the fact; the host owns the approve/ask/deny decision (pack never decides).
+SANDBOX_FACTS_DIRNAME = "sandbox-facts"
 
 
 def bash_available() -> bool:
@@ -37,11 +52,19 @@ class SessionResult(dict):
 
 
 def _session_key(ctx: ToolExecutionContext) -> str:
-    raw = "/".join(
-        part
-        for part in (ctx.workspace_id, ctx.user_slug, ctx.session_plan_digest, ctx.surface_id)
-        if part
-    ) or "default"
+    raw = (
+        "/".join(
+            part
+            for part in (
+                ctx.workspace_id,
+                ctx.user_slug,
+                ctx.session_plan_digest,
+                ctx.surface_id,
+            )
+            if part
+        )
+        or "default"
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -61,18 +84,16 @@ def _sandbox_degraded() -> list[str]:
 
     Returns a list of reasons. Empty means fully functional; an empty list when
     ``_sandbox_available()`` is False means the bwrap pack itself is missing.
-    Probing a real namespaced run here would be redundant - ``bwrap_run``
-    re-probes on every call and reports failures explicitly (never silently).
+    The bwrap probe performs a real namespaced run, so a present binary with
+    disabled user namespaces never gets reported as contained.
     """
     if not _sandbox_available():
         return []
     try:
-        from lisa_packs.bwrap.probe import bwrap_binary
-    except Exception:  # pragma: no cover - bwrap pack always present when registered
-        return []
-    if bwrap_binary() is None:
-        return ["bubblewrap (bwrap) binary not found on PATH"]
-    return []
+        from lisa_packs.bwrap.probe import detect_capabilities
+    except ImportError:  # pragma: no cover - bwrap pack always present when registered
+        return ["bubblewrap capability probe is unavailable"]
+    return list(detect_capabilities().missing)
 
 
 class BashSession:
@@ -135,6 +156,55 @@ class BashSession:
         ]
 
 
+def _containment_current() -> tuple[str, list[str]]:
+    """Compute the live containment state from current environment probes.
+
+    Reads ``_sandbox_available`` / ``_sandbox_degraded`` fresh so a mid-session
+    flip (or a stale cached ``session.sandboxed``) is reflected the next time
+    the approval engine reads the fact — an unsandboxed host must never be
+    reported as contained.
+
+    - ``contained`` — registered and runnable (commands compose through bwrap).
+    - ``degraded``  — the pack is registered but cannot run (binary missing,
+      user namespaces disabled). Reasons explain the gap to the operator.
+    - ``none``      — no sandbox registered at all; commands run on the host.
+    """
+    if _sandbox_available():
+        reasons = _sandbox_degraded()
+        if reasons:
+            return "degraded", reasons
+        return "contained", []
+    return "none", ["sandbox pack not installed"]
+
+
+def _write_containment_fact(session: BashSession) -> None:
+    """Publish this session's containment fact for the host approval engine.
+
+    Writes ``<data_dir>/sandbox-facts/<session_key>.json`` atomically so the
+    policy engine can read it at approval time WITHOUT importing pack code —
+    the pack reports the fact, the host owns the decision. The host recomputes
+    the session key from the approval identity (same four inputs), so the file
+    is the only coupling between pack and host on this axis. Never raises: a
+    failure to publish must not block a shell session (the engine fails closed
+    to a prompt when the fact is absent or unreadable).
+    """
+    state, reasons = _containment_current()
+    payload = {
+        "tool_id": "bash_run",
+        "containment": state,
+        "reasons": reasons,
+        "probed_at": datetime.now(UTC).isoformat(),
+    }
+    path = session.data_dir / SANDBOX_FACTS_DIRNAME / f"{session.session_key}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:  # pragma: no cover - logging only, non-fatal
+        logger.debug("bash: containment fact write failed (%s)", exc)
+
+
 def resolve_or_create_session(
     ctx: ToolExecutionContext,
     *,
@@ -148,6 +218,9 @@ def resolve_or_create_session(
     key = _session_key(ctx)
     session = _SESSIONS.get(key)
     if session is not None:
+        # Refresh the fact on every reuse so a mid-session sandbox flip (or a
+        # stale cache) is reflected the next time the approval engine reads it.
+        _write_containment_fact(session)
         return session
 
     data_dir = Path(ctx.data_dir) if ctx.data_dir else Path.home() / ".lisa"
@@ -159,6 +232,7 @@ def resolve_or_create_session(
         sandboxed=_sandbox_available() if sandboxed is None else sandboxed,
     )
     _SESSIONS[key] = session
+    _write_containment_fact(session)
     return session
 
 

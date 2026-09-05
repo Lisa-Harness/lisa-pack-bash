@@ -1,0 +1,9 @@
+operation_id: sandbox_facts
+description: "Resolve the bash session and publish its sandbox containment fact for the approval engine."
+pack_id: lisa-pack-bash
+effect: read
+approval_required: false
+mode_allowlist: [shell]
+timeout_seconds: 10
+max_calls_per_turn: 0
+exportable: false

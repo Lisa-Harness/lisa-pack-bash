@@ -8,7 +8,13 @@ include = ["lisa_packs*", "lisa_packs.bash*"]
 
 [tool.setuptools.package-data]
 "lisa_packs" = ["*"]
-"lisa_packs.bash" = ["tools/**/*.yml", "content/**/*.md", "content/**/*.tmpl", "modes/**/*.md"]
+"lisa_packs.bash" = [
+    "tools/**/*.yml",
+    "operations/**/*.yml",
+    "content/**/*.md",
+    "content/**/*.tmpl",
+    "modes/**/*.md",
+]
 
 [project]
 name = "lisa-pack-bash"
