@@ -9,7 +9,8 @@ this is visible to you and to the user.
 
 - Read-only root filesystem; commands cannot mutate the real FS.
 - Network isolation (off by default, opt-in per command).
-- Overlayfs layers capture mutations transparently per session.
+- Ephemeral write space: command mutations go to tmpfs inside the sandbox and
+  are discarded on exit (the real FS stays untouched).
 
 ## How to enable it
 

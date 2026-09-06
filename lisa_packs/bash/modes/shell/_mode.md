@@ -22,10 +22,11 @@ session.
 
 ## How the session behaves
 
-- **State persists across calls** — cwd, exported environment variables, and
-  files carry over between `bash_run` calls within a session. Build state
-  incrementally (cd, export, create files) instead of one giant command, and
-  re-declare anything critical so each command stays reproducible.
+- **Each call is a fresh machine** — cwd, environment, and filesystem changes
+  do NOT carry over between `bash_run` calls. Sandbox writes go to ephemeral
+  tmpfs and are discarded when the run exits. Create and consume files within
+  a single call; re-create anything a later call needs, and re-declare any
+  critical state so each command stays reproducible.
 - **Output is bounded** — stdout/stderr are truncated and flagged with
   `truncated: true`. For large outputs, write to a file and inspect it in
   slices (`head`, `tail`, `grep`) rather than dumping to stdout.
@@ -38,18 +39,20 @@ session.
 
 ## Sandboxing
 
-- When `sandboxed: true`, `backend`, `layer_id`, and `persistence` report
-  where the command ran and whether its file mutations are kept. Sandboxing
-  is automatic; use `network: true` only when a command genuinely needs
-  network access.
+- When `sandboxed: true`, `backend` and `persistence` report where the command
+  ran and whether its mutations were kept (`persistence: "ephemeral"` means
+  they were discarded). Sandboxing is automatic; use `network: true` only when
+  a command genuinely needs network access.
 - `sandboxed: false` means the command ran directly on the host with no
   isolation. Surface this to the user when you see it.
 - If a call **errors** with "sandbox execution failed" or the result carries
-  `missing` / `degraded`, the sandbox itself could not run on this host
-  (e.g. the `bwrap` binary is absent even though the pack is installed, or
-  user namespaces are disabled). Read the `missing` list and the remediation
-  doc, tell the user exactly what to install or enable, and do NOT keep
-  retrying the command — it fails deliberately rather than running silently
+  `missing` / `degraded`, read the `missing` list and the note: it states the
+  exact cause. Fixable causes (bwrap binary absent, user namespaces disabled)
+  come with install instructions — tell the user what to install or enable.
+  A note saying bwrap "drops all capabilities" means overlayfs capture is
+  structurally unavailable — the sandbox still runs with ephemeral tmpfs, and
+  retrying with `persist`/`layer_id` cannot succeed. Do NOT keep retrying the
+  command in either case — it fails deliberately rather than running silently
   without isolation.
 
 ## Practices
