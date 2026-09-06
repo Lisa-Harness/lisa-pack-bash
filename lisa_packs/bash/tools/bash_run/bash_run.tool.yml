@@ -1,9 +1,9 @@
 tool_id: bash_run
 pack_id: lisa-pack-bash
 module_path: lisa_packs.bash.tools.bash_run.bash_run
-description: "Run a command in a persistent bash session primed for agent use. Output is demarcated by a unique sentinel; state persists across calls within a session."
+description: "Run a command in a bash session primed for agent use. Posture depends on the result's sandboxed/backend/persistence fields: sandboxed:false = real, permanent changes on the host (be conservative, confirm before mutating); backend tmpfs = ephemeral scratch (probe freely, produce a patch/script for the user, verify it under scratch_dir); backend overlay = changes captured to a mergeable layer via persist/layer_id. Output is demarcated by a unique sentinel."
 effect: execute
-approval_required: false
+approval_required: true
 approval_preview: "run a shell command"
 display_template: "{command}"
 exportable: true

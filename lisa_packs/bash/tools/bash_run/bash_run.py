@@ -25,11 +25,18 @@ class Parameters(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1, le=300)
     persist: bool = Field(
         default=False,
-        description="Keep the sandbox overlay layer after this run (only when sandboxed).",
+        description=(
+            "Keep the captured overlay layer after the session ends (only when "
+            "sandboxed). Mutations to the workspace are captured either way; "
+            "persist just retains the layer beyond the session."
+        ),
     )
     layer_id: str = Field(
         default="",
-        description="Explicit sandbox overlay layer id (only when sandboxed).",
+        description=(
+            "Explicit sandbox overlay layer id: opt in to capturing workspace "
+            "changes (only when sandboxed)."
+        ),
     )
     network: bool = Field(
         default=False,
@@ -108,6 +115,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         output_json["backend"] = result["backend"]
         output_json["layer_id"] = result.get("layer_id")
         output_json["persistence"] = result.get("persistence")
+        if result.get("capture_root"):
+            output_json["capture_root"] = result["capture_root"]
+        if result.get("scratch_dir"):
+            output_json["scratch_dir"] = result["scratch_dir"]
     if result.get("degraded"):
         output_json["degraded"] = True
         output_json["note"] = result.get("note")

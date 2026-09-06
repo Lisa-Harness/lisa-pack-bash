@@ -141,6 +141,7 @@ async def _run_via_bwrap(
             "layer_id": layer_id,
         },
         data_dir=ctx.data_dir,
+        pack_config=ctx.pack_config,
         approval_service=ctx.approval_service,
         approval_request_id=ctx.approval_request_id,
         session_plan_digest=ctx.session_plan_digest,
@@ -212,6 +213,8 @@ async def run_in_session(
                 "backend": payload.get("backend"),
                 "layer_id": payload.get("layer_id"),
                 "persistence": payload.get("persistence"),
+                "capture_root": payload.get("capture_root"),
+                "scratch_dir": payload.get("scratch_dir"),
             }
             if payload.get("degraded"):
                 result["degraded"] = True
