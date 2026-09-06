@@ -88,14 +88,14 @@ async def test_sandboxed_composition_threaded(monkeypatch, tmp_path: Path) -> No
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
     ctx = _ctx(tmp_path, command="touch /tmp/x")
-    ctx.parameters["network"] = True
+    ctx.parameters["overrides"] = {"network": "allow"}
     ctx.parameters["persist"] = True
     result = await bash_run.execute(ctx)
     assert result.error == ""
     assert result.output_json["sandboxed"] is True
     assert result.output_json["backend"] == "tmpfs"
     assert seen["command"] == "touch /tmp/x"
-    assert seen["kwargs"]["network"] is True
+    assert seen["kwargs"]["overrides"] == {"network": "allow"}
     assert seen["kwargs"]["persist"] is True
 
 

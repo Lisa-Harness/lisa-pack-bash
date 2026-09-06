@@ -79,6 +79,50 @@ def _sandbox_available() -> bool:
     return "bwrap_run" in get_tool_catalog()
 
 
+def _floor_requires_sandbox(ctx: ToolExecutionContext) -> bool | None:
+    """Read the harness floor's execution posture for this pack.
+
+    Returns True when the harness floor mandates the sandbox (the model or fate
+    may never run bare), False when the floor deliberately permits bare, and
+    None when the floor is unset/unreadable (fall back to availability). The
+    floor is trusted session configuration - the lisa kernel populates
+    ``pack_config`` from ``resources.packs.configuration`` and model
+    ``parameters`` cannot forge it. bwrap is intentionally not imported (pack
+    isolation forbids cross-pack imports), so the policy is parsed locally with
+    no dependency on the bwrap pack.
+    """
+    pack_config = getattr(ctx, "pack_config", None)
+    if not isinstance(pack_config, dict):
+        return None
+    sandbox = pack_config.get("sandbox")
+    if not isinstance(sandbox, dict):
+        return None
+    floor = sandbox.get("floor")
+    if not isinstance(floor, dict):
+        return None
+    execution = floor.get("execution")
+    if execution == "sandbox":
+        return True
+    if execution == "bare":
+        return False
+    return None
+
+
+class SandboxRequiredButUnavailable(RuntimeError):  # noqa: N818 - not a tool error
+    """The floor mandates sandboxed execution but the bwrap pack cannot run."""
+
+    def __init__(self, reasons: list[str]) -> None:
+        self.reasons = list(reasons)
+        detail = "; ".join(reasons) if reasons else "the bwrap pack is not installed"
+        super().__init__(
+            "The sandbox floor for this session requires contained execution "
+            f"(execution=sandbox), but the sandbox cannot run: {detail}. "
+            "Running unsandboxed would silently violate the harness policy, so "
+            "this shell is unavailable until the sandbox is fixed or the floor "
+            "is deliberately lowered. See bwrap_missing.md."
+        )
+
+
 def _sandbox_degraded() -> list[str]:
     """Report sandbox gaps when the pack is registered but the host cannot run it.
 
@@ -159,15 +203,12 @@ class BashSession:
 def _containment_current() -> tuple[str, list[str]]:
     """Compute the live containment state from current environment probes.
 
-    Reads ``_sandbox_available`` / ``_sandbox_degraded`` fresh so a mid-session
-    flip (or a stale cached ``session.sandboxed``) is reflected the next time
-    the approval engine reads the fact — an unsandboxed host must never be
-    reported as contained.
-
-    - ``contained`` — registered and runnable (commands compose through bwrap).
-    - ``degraded``  — the pack is registered but cannot run (binary missing,
-      user namespaces disabled). Reasons explain the gap to the operator.
-    - ``none``      — no sandbox registered at all; commands run on the host.
+    - ``contained``        - registered and runnable (commands compose via bwrap).
+    - ``degraded``         - registered but cannot run (binary missing, userns
+      disabled). Reasons explain the gap to the operator.
+    - ``deliberate_bare``  - the harness floor permits bare and the sandbox is
+      unavailable; a CHOSEN posture, distinct from an unexpected gap.
+    - ``none``             - no sandbox registered at all; commands run on the host.
     """
     if _sandbox_available():
         reasons = _sandbox_degraded()

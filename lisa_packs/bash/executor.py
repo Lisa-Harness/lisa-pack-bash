@@ -116,11 +116,17 @@ async def _run_via_bwrap(
     inner_argv: list[str],
     *,
     timeout_seconds: int,
-    network: bool,
+    overrides: dict[str, Any],
     persist: bool,
     layer_id: str,
 ) -> dict[str, Any]:
-    """Compose the command through the bwrap_run tool via a child ctx."""
+    """Compose the command through the bwrap_run tool via a child ctx.
+
+    Network/device/path containment is decided by the harness floor inside
+    bwrap_run (read from ``pack_config``); bash forwards the model's tightening
+    ``overrides`` and the floor does the rest - the model can only raise
+    integrity, never loosen it.
+    """
     from kernel.tools.registry import execute_tool
 
     child = ToolExecutionContext(
@@ -135,7 +141,7 @@ async def _run_via_bwrap(
         query=ctx.query,
         parameters={
             "argv": inner_argv,
-            "network": network,
+            "overrides": overrides,
             "timeout_seconds": timeout_seconds,
             "persist": persist,
             "layer_id": layer_id,
@@ -171,7 +177,7 @@ async def run_in_session(
     command: str,
     *,
     timeout_seconds: int,
-    network: bool = False,
+    overrides: dict[str, Any] | None = None,
     persist: bool = False,
     layer_id: str = "",
 ) -> dict[str, Any]:
@@ -184,7 +190,7 @@ async def run_in_session(
                 ctx,
                 inner_argv,
                 timeout_seconds=max(timeout_seconds, 1) + 30,
-                network=network,
+                overrides=overrides or {},
                 persist=persist,
                 layer_id=layer_id,
             )

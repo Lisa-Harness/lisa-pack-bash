@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from lisa_packs.bash import read_authored_text
 from lisa_packs.bash.executor import run_in_session
 from lisa_packs.bash.session import (
+    SandboxRequiredButUnavailable,
+    _floor_requires_sandbox,
     _sandbox_available,
     _sandbox_degraded,
     bash_available,
@@ -38,9 +40,14 @@ class Parameters(BaseModel):
             "changes (only when sandboxed)."
         ),
     )
-    network: bool = Field(
-        default=False,
-        description="Allow network access (only when sandboxed).",
+    overrides: dict = Field(
+        default_factory=dict,
+        description=(
+            "Tightening overrides for the sandbox (only when sandboxed), keyed "
+            "by axis: persistence (ephemeral|overlay|readonly), network "
+            "(allow|deny), paths ({path: rw|ro|hidden}). Overrides may only "
+            "raise integrity above the harness floor, never loosen it."
+        ),
     )
 
 
@@ -59,11 +66,43 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             output_json={"missing": ["bash"], "doc": install_doc},
         )
 
-    sandboxed = _sandbox_available()
-    degraded_reasons = _sandbox_degraded() if sandboxed else []
+    available = _sandbox_available()
+    degraded_reasons = _sandbox_degraded() if available else []
+    requires = _floor_requires_sandbox(ctx)
+    sandboxed = available
+    deliberate_bare = False
+    if requires is True:
+        if not available:
+            exc = SandboxRequiredButUnavailable(["sandbox pack not installed"])
+            return ToolResult(
+                tool_id=TOOL_ID,
+                error=str(exc),
+                output_json={
+                    "sandboxed": False,
+                    "missing": exc.reasons,
+                    "doc": read_authored_text("prompts/bwrap_missing.md"),
+                },
+            )
+        if degraded_reasons:
+            exc = SandboxRequiredButUnavailable(degraded_reasons)
+            return ToolResult(
+                tool_id=TOOL_ID,
+                error=str(exc),
+                output_json={
+                    "sandboxed": False,
+                    "missing": degraded_reasons,
+                    "doc": read_authored_text("prompts/bwrap_missing.md"),
+                },
+            )
+    elif requires is False and not available:
+        # The floor deliberately permits bare execution (e.g. on a host without
+        # bwrap): run bare by choice, stamped distinctly from a broken sandbox.
+        sandboxed = False
+        deliberate_bare = True
+
     session = resolve_or_create_session(ctx, sandboxed=sandboxed)
     degraded_doc = ""
-    if not sandboxed:
+    if not sandboxed and not deliberate_bare:
         degraded_doc = read_authored_text("prompts/bash_no_sandbox.md")
     elif degraded_reasons:
         degraded_doc = read_authored_text("prompts/bwrap_missing.md")
@@ -74,7 +113,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             session,
             params.command,
             timeout_seconds=params.timeout_seconds,
-            network=params.network,
+            overrides=params.overrides,
             persist=params.persist,
             layer_id=params.layer_id,
         )
@@ -122,7 +161,14 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     if result.get("degraded"):
         output_json["degraded"] = True
         output_json["note"] = result.get("note")
-    if not sandboxed:
+    if deliberate_bare:
+        output_json["mode"] = "bare"
+        output_json["note"] = (
+            "Running unsandboxed on the host because the sandbox floor for this "
+            "session permits bare execution. Changes are permanent - confirm "
+            "before mutating."
+        )
+    elif not sandboxed:
         output_json["note"] = (
             "bwrap pack not installed: running unsandboxed on the host. "
             "See sandboxing_degraded.md to enable the sandbox."
