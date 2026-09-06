@@ -11,7 +11,7 @@ routing_intent_keywords:
   shell: [shell, bash, command, terminal, run, execute, cli]
 satisfies_intents: [shell, execute]
 allowed_tool_ids: [bash_run, layers_list]
-entry_operation_ids: [sandbox_facts]
+pre_turn_operation_ids: [sandbox_facts]
 ---
 
 # Shell Mode

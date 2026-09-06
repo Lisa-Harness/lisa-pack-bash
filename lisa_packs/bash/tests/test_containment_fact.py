@@ -108,8 +108,8 @@ def test_session_key_matches_engine_recompute(tmp_path: Path) -> None:
     assert (tmp_path / SANDBOX_FACTS_DIRNAME / f"{expected}.json").is_file()
 
 
-def test_entry_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
-    """The shell entry op resolves the session (writing the fact) at mode entry."""
+def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
+    """The shell pre-turn op resolves the session (writing the fact) before the model call."""
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(_session, "_sandbox_degraded", lambda: [])
     op_ctx = OperationExecutionContext(

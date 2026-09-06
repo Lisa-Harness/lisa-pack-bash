@@ -1,7 +1,7 @@
-"""Sandbox-facts prewarm operation (shell mode entry).
+"""Sandbox-facts prewarm operation (shell mode pre-turn).
 
-Runs once when the operator enters shell mode (bound via the mode's
-``entry_operation_ids``). It resolves — creating if needed — the bash session
+Runs before every shell-mode model call (bound via the mode's
+``pre_turn_operation_ids``). It resolves — creating if needed — the bash session
 for this context identity, which both primes the session and publishes the
 per-session sandbox containment fact to ``<data_dir>/sandbox-facts/<key>.json``.
 
@@ -11,6 +11,13 @@ sandbox-boundary check would read a missing fact and prompt even though the
 command would have run sandboxed. Resolving here closes that inversion so the
 very first gate sees the true containment state. The pack only reports the
 fact; the host approval engine owns the approve/ask/deny decision.
+
+Not wired as ``entry_operation_ids``: the kernel's work-entry-op contract
+ends the turn with the entry result's ``output_text`` before any model call,
+so an entry-op binding turned every shell turn into the literal prewarm
+string ("shell session ready (contained)") and swallowed the operator's
+query. Pre-turn binding keeps the same session priming and fact publication
+while the turn proceeds to the model normally.
 """
 
 from __future__ import annotations
