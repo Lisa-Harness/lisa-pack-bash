@@ -5,4 +5,5 @@ description: "Run a command in a persistent bash session primed for agent use. O
 effect: execute
 approval_required: false
 approval_preview: "run a shell command"
+display_template: "{command}"
 exportable: true
