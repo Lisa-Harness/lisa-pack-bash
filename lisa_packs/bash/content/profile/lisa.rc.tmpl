@@ -1,7 +1,7 @@
 #!/bin/bash
 # Lisa agent-optimized bash session rc.
 # Rendered per session by lisa_packs.bash.priming; not for interactive human use.
-# Placeholders: %%SENTINEL%%, %%LOG_PATH%%, %%LANG%%
+# Placeholders: %%SENTINEL%%, %%LOG_PATH%%, %%STATE_FILE%%, %%LANG%%
 
 # Disable history and history expansion for determinism.
 set +H
@@ -26,6 +26,13 @@ export MANPAGER=cat
 export PS1="%%SENTINEL%%"
 export PS2=""
 export PS4="+ "
+
+# Replay session state from the previous call (cwd, and any exported vars /
+# functions selected by policy). Sourced at the top so the session carries
+# over between `bash -c` invocations without leaking host state.
+if [ -f "%%STATE_FILE%%" ]; then
+    . "%%STATE_FILE%%"
+fi
 
 # After every command: print return code + sentinel on its own line so the
 # handler can parse output vs prompt and recover the exit status.

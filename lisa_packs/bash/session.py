@@ -9,12 +9,16 @@ host and every result is stamped ``sandboxed: false`` (visible, not silent).
 
 from __future__ import annotations
 
+import asyncio
+import fnmatch
 import hashlib
 import json
 import logging
+import shlex
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from kernel.models import ToolExecutionContext
 
@@ -45,6 +49,47 @@ SANDBOX_FACTS_DIRNAME = "sandbox-facts"
 def bash_available() -> bool:
     """Return True when a bash binary is on PATH."""
     return shutil.which(_BASH_BIN) is not None
+
+
+#: Default state-carryover policy: cwd and env always carry; functions are
+#: opt-in via `pack_config["session_state"]["functions"]` (the harness is the
+#: policy owner; the model cannot forge it).
+_DEFAULT_SESSION_STATE = {
+    "cwd": True,
+    "env": True,
+    "functions": "off",
+    "function_allow": [],
+    "function_block": [],
+}
+
+
+def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
+    """Resolve the session-state carryover policy for this ctx.
+
+    Floor default: cwd+env always carry. Functions are off unless the
+    harness opts in via ``session_state.functions`` (``"allowlist"`` /
+    ``"blocklist"`` plus ``function_allow``/``function_block`` globs).
+    Unknown keys are ignored so the policy is a stable extension point.
+    """
+    policy = dict(_DEFAULT_SESSION_STATE)
+    pack_config = getattr(ctx, "pack_config", None)
+    if not isinstance(pack_config, dict):
+        return policy
+    override = pack_config.get("session_state")
+    if not isinstance(override, dict):
+        return policy
+    if override.get("cwd") is False:
+        policy["cwd"] = False
+    if override.get("env") is False:
+        policy["env"] = False
+    functions = override.get("functions")
+    if functions in ("allowlist", "blocklist", "off"):
+        policy["functions"] = functions
+    for key in ("function_allow", "function_block"):
+        value = override.get(key)
+        if isinstance(value, list):
+            policy[key] = [p for p in value if isinstance(p, str)]
+    return policy
 
 
 class SessionResult(dict):
@@ -141,7 +186,7 @@ def _sandbox_degraded() -> list[str]:
 
 
 class BashSession:
-    """One Lisa session's shell: priming, logging, and command execution."""
+    """One Lisa session's shell: priming, logging, state, and execution."""
 
     def __init__(
         self,
@@ -150,12 +195,170 @@ class BashSession:
         data_dir: Path,
         priming: SessionPriming,
         sandboxed: bool,
+        initial_env: frozenset[str] | None = None,
+        initial_funcs: frozenset[str] | None = None,
+        state_policy: dict[str, Any] | None = None,
     ) -> None:
         self.session_key = session_key
         self.data_dir = data_dir
         self.priming = priming
         self.sandboxed = sandboxed
         self._rc: object | None = None
+        # Job registry: backgrounded commands tracked by id. Values are
+        # host-side asyncio.Tasks; artifacts live under jobs_dir.
+        self.jobs: dict[str, asyncio.Task] = {}
+        # Baseline: what the rc already exports/defines before the model ever
+        # runs anything. A carryover delta is computed against this so the rc's
+        # own exports (LANG, TERM, NO_COLOR…) aren't treated as state to replay.
+        self._base_env: frozenset[str] = initial_env or frozenset()
+        self._base_funcs: frozenset[str] = initial_funcs or frozenset()
+        self._state_policy: dict[str, Any] = dict(
+            _DEFAULT_SESSION_STATE, **(state_policy or {})
+        )
+
+    @property
+    def jobs_dir(self) -> Path:
+        """Directory for job artifacts and spill files (host-visible)."""
+        return self.data_dir / "jobs" / self.session_key
+
+    def record_post_run_state(
+        self,
+        *,
+        cwd: str,
+        exported: dict[str, str],
+        func_names: list[str],
+    ) -> None:
+        """Persist the per-call state capture to the replay file.
+
+        The host (not the shell in-sandbox) writes this file, then the next
+        rc source replays it. Only the delta against the baseline is replayed:
+        rc-managed exports (LANG, TERM…) are excluded so a second source of
+        the state file cannot clobber the rc's own exports.
+        """
+        lines: list[str] = ["# Auto-managed by lisa bash pack. Do not edit."]
+        if self._state_policy["cwd"] and cwd and cwd != ".":
+            lines.append(f"cd {shlex.quote(cwd)}")
+        if self._state_policy["env"]:
+            for name, value in sorted(exported.items()):
+                if name and name not in self._base_env:
+                    lines.append(f"export {name}={shlex.quote(value)}")
+        if self._state_policy["functions"] != "off":
+            allow: list[str] = self._state_policy["function_allow"]
+            block: list[str] = self._state_policy["function_block"]
+            for name in func_names:
+                if (
+                    name
+                    and name not in self._base_funcs
+                    and self._fn_included(name, allow, block)
+                ):
+                    # Functions are marked for re-definition via a comment; the
+                    # actual bodies are re-sourced from the delta below.
+                    lines.append(f"# carry:func:{name}")
+        path = self.priming.state_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".sh.tmp")
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            logger.debug("bash: state file write failed (%s)", exc)
+
+    @staticmethod
+    def _fn_included(name: str, allow: list[str], block: list[str]) -> bool:
+        for pattern in block:
+            if fnmatch.fnmatch(name, pattern):
+                return False
+        if not allow:
+            return True
+        return any(fnmatch.fnmatch(name, pattern) for pattern in allow)
+
+    def job_artifacts(self, job_id: str) -> tuple[Path, Path, Path]:
+        """(log, rc, status) paths for one job under jobs_dir."""
+        base = self.jobs_dir / job_id
+        return (
+            base.with_suffix(".log"),
+            base.with_suffix(".rc"),
+            base.with_suffix(".status.json"),
+        )
+
+    def register_job(self, job_id: str, task: "asyncio.Task[Any]") -> None:
+        """Add a running background job and persist a ``running`` status file."""
+        self.jobs[job_id] = task
+        log_path, rc_path, status_path = self.job_artifacts(job_id)
+        self._write_job_status(
+            status_path,
+            {
+                "job_id": job_id,
+                "state": "running",
+                "started_at": datetime.now(UTC).isoformat(),
+                "log_path": str(log_path),
+                "rc_path": str(rc_path),
+            },
+        )
+
+    def complete_job(self, job_id: str, *, rc: int | None, killed: bool) -> None:
+        """Persist a finished job's status and drop it from the running set."""
+        log_path, rc_path, status_path = self.job_artifacts(job_id)
+        self._write_job_status(
+            status_path,
+            {
+                "job_id": job_id,
+                "state": "killed" if killed else "done",
+                "rc": rc,
+                "ended_at": datetime.now(UTC).isoformat(),
+                "log_path": str(log_path),
+                "rc_path": str(rc_path),
+            },
+        )
+        self.jobs.pop(job_id, None)
+
+    def _write_job_status(self, status_path: Path, payload: dict[str, Any]) -> None:
+        try:
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = status_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(status_path)
+        except OSError as exc:
+            logger.debug("bash: job status write failed (%s)", exc)
+
+    def apply_cwd(self, cwd: str) -> None:
+        """Replace only the ``cd`` line in the state file, keeping env/functions.
+
+        Used after a batch: env/function deltas from children are discarded,
+        but a cwd every child agreed on is adopted.
+        """
+        if not self._state_policy["cwd"] or not cwd or cwd == ".":
+            return
+        path = self.priming.state_path
+        try:
+            existing = (
+                path.read_text(encoding="utf-8")
+                if path.is_file()
+                else "# Auto-managed by lisa bash pack. Do not edit.\n"
+            )
+            lines = [ln for ln in existing.splitlines() if not ln.startswith("cd ")]
+            if not lines:
+                lines = ["# Auto-managed by lisa bash pack. Do not edit."]
+            lines.append(f"cd {shlex.quote(cwd)}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".sh.tmp")
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            logger.debug("bash: cwd apply failed (%s)", exc)
+
+    def jobs_summary(self) -> list[dict[str, Any]]:
+        """Snapshot of running jobs for embedding in a result's background_jobs."""
+        out: list[dict[str, Any]] = []
+        for job_id, task in self.jobs.items():
+            out.append(
+                {
+                    "job_id": job_id,
+                    "done": task.done(),
+                    "log_path": str(self.job_artifacts(job_id)[0]),
+                }
+            )
+        return out
 
     def ensure_primed(self) -> None:
         """Render the rc once per session."""
@@ -171,30 +374,46 @@ class BashSession:
         return self.priming.sentinel
 
     def build_inner_argv(self, command: str) -> list[str]:
-        """Build the bash argv that sources the rc and runs the command.
+        """Build the bash argv that replays the rc + state and runs the command.
 
-        Uses ``--rcfile`` so the priming profile (env hygiene, locale, log
-        path) is applied deterministically. Under ``bash -c`` prompts never
-        render, so the rc's PS1/PROMPT_COMMAND sentinel cannot fire on its
-        own; the command is therefore wrapped to emit the rc marker
-        explicitly and exit with the command's status so the executor can
-        recover a truthful return code.
+        ``--rcfile`` is not honored by ``bash -c``, so the rc is sourced
+        explicitly at the top of the wrapper. The rc in turn sources the
+        state file (cwd, exported vars, functions from the prior call), then
+        the model's command runs, then trailing printf state-emitters capture
+        rc + PIPESTATUS + new exports (delta-filtered) for the next call.
         """
         self.ensure_primed()
         rc_path = self.priming.rc_path
         marker = f"{self.sentinel.strip()}rc="
+        state_marker = f"{self.sentinel.strip()}state="
         wrapped = (
+            # rc is sourced explicitly because `bash -c` ignores --rcfile.
+            f". {shlex.quote(str(rc_path))}; "
             f"{command}\n"
-            # Leading \n keeps the marker on its own line even when the
-            # command's output has no trailing newline, so the parser never
-            # concatenates (and drops) the final output line.
-            f'__lisa_rc=$?; printf \'\\n%s\\n\' "{marker}$__lisa_rc"; exit "$__lisa_rc"'
+            # `$?` and `${PIPESTATUS[*]}` must be captured in ONE assignment -
+            # any intermediate command resets one of them. We bundle them into
+            # a single var via `rc,pipe1 pipe2...` and split on the first comma.
+            # Leading \\n keeps the marker parseable when output lacks a final newline.
+            "__lisa_rcpipe=$?,$(printf '%s ' \"${PIPESTATUS[@]}\") ; "
+            '__lisa_rc=${__lisa_rcpipe%%,*}; '
+            '__lisa_pipe=${__lisa_rcpipe#*,}; '
+            f"printf '\\n{marker}%s pipe=%s\\n' \"$__lisa_rc\" \"$__lisa_pipe\"; "
+            # A separate state line powers session-wide carryover: cwd plus
+            # each new export on its own indented continuation line (so values
+            # containing spaces cannot break the parser), then function names.
+            # The host delta-filters against the rc baseline, so rc-managed
+            # exports (LANG, TERM…) are never replayed.
+            f'printf \'%s\\n\' "{state_marker}cwd=$(printf \'%q\' "$PWD")"; '
+            'compgen -A export 2>/dev/null | while IFS= read -r n; '
+            f'do v="${{!n}}"; printf \'%svar %s=%q\\n\' '
+            f'"{self.sentinel.strip()}" "$n" "$v"; done; '
+            'funcs=$(compgen -A function 2>/dev/null | tr \'\\n\' \' \'); '
+            f'printf \'%sfuncs %s\\n\' "{self.sentinel.strip()}" "$funcs"; '
+            'exit "$__lisa_rc"'
         )
         return [
             _BASH_BIN,
             "--noprofile",
-            "--rcfile",
-            str(rc_path),
             "-c",
             wrapped,
         ]
@@ -246,6 +465,50 @@ def _write_containment_fact(session: BashSession) -> None:
         logger.debug("bash: containment fact write failed (%s)", exc)
 
 
+def _baseline_snapshot(rc_content: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Run the rendered rc host-side once and capture its export/function set.
+
+    One extra subprocess per session is a cheap price for a delta that
+    excludes the rc's own exports from replay. Falls back to empty sets on
+    failure — the session still works, it just replays more than strictly
+    needed.
+    """
+    probe = (
+        rc_content
+        + '\nprintf "__ENV__\\n"; compgen -A export 2>/dev/null'
+        + '\nprintf "__FUNCS__\\n"; compgen -A function 2>/dev/null\n'
+    )
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [_BASH_BIN, "--noprofile", "-c", probe],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return frozenset(), frozenset()
+    env: set[str] = set()
+    funcs: set[str] = set()
+    section: str | None = None
+    for line in result.stdout.splitlines():
+        if line == "__ENV__":
+            section = "env"
+            continue
+        if line == "__FUNCS__":
+            section = "funcs"
+            continue
+        if section == "env":
+            env.add(line.strip())
+        elif section == "funcs":
+            funcs.add(line.strip())
+    env.discard("")
+    funcs.discard("")
+    return frozenset(env), frozenset(funcs)
+
+
 def resolve_or_create_session(
     ctx: ToolExecutionContext,
     *,
@@ -259,18 +522,21 @@ def resolve_or_create_session(
     key = _session_key(ctx)
     session = _SESSIONS.get(key)
     if session is not None:
-        # Refresh the fact on every reuse so a mid-session sandbox flip (or a
-        # stale cache) is reflected the next time the approval engine reads it.
         _write_containment_fact(session)
         return session
 
     data_dir = Path(ctx.data_dir) if ctx.data_dir else Path.home() / ".lisa"
     priming = SessionPriming(data_dir=data_dir, session_key=key)
+    rc_content = priming.render()
+    env, funcs = _baseline_snapshot(rc_content.path.read_text(encoding="utf-8"))
     session = BashSession(
         session_key=key,
         data_dir=data_dir,
         priming=priming,
         sandboxed=_sandbox_available() if sandboxed is None else sandboxed,
+        initial_env=env,
+        initial_funcs=funcs,
+        state_policy=_session_state_policy(ctx),
     )
     _SESSIONS[key] = session
     _write_containment_fact(session)

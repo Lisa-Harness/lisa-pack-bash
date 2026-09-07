@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 
-from sdk.content._catalog import build_tool_catalog_json, resolve_tool_roots
+from sdk.content._catalog import (
+    build_mode_catalog_json,
+    build_tool_catalog_json,
+    resolve_mode_roots,
+    resolve_tool_roots,
+)
 
 from lisa_packs.bash import get_content_root
 
@@ -23,3 +28,18 @@ def test_bash_pack_bash_run_tool_discovered() -> None:
     assert tool["approval_required"] is True
     assert tool["exportable"] is True
     assert tool["module_path"] == "lisa_packs.bash.tools.bash_run.bash_run"
+    assert "background" in tool["description"].lower() or "batch" in tool["description"].lower()
+
+
+def test_shell_mode_still_routable() -> None:
+    """Frontmatter is load-bearing: command_pattern + routable must survive rewrites."""
+    roots = resolve_mode_roots([get_content_root()])
+    assert roots, "No modes/ directory found in bash pack"
+    catalog = json.loads(build_mode_catalog_json(roots))
+    assert "shell" in catalog
+    mode = catalog["shell"]
+    assert mode["routable"] is True
+    assert mode["command_pattern"].startswith("^(?:/)?shell")
+    assert "bash_run" in mode["allowed_tool_ids"]
+    assert "layers_list" in mode["allowed_tool_ids"]
+    assert "sandbox_facts" in mode["pre_turn_operation_ids"]

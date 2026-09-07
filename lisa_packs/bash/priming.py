@@ -2,8 +2,10 @@
 
 The rc is an authored template under ``content/profile/lisa.rc.tmpl``
 (pack-content rule: no embedded markdown/shell prose in .py). We substitute a
-unique sentinel, the per-session log path, and locale, then write it under the
-host data dir for the session launcher to source.
+unique sentinel, the per-session log path, and the state-file path, then write
+it under the host data dir for the session launcher to source. The state file
+is rendered lazily by the session layer once the harness post-command state
+is known.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ def render_rc(
     *,
     sentinel: str,
     log_path: Path,
+    state_path: Path,
     lang: str = "C.UTF-8",
     template_dir: Path | None = None,
 ) -> str:
@@ -47,6 +50,7 @@ def render_rc(
     return (
         body.replace("%%SENTINEL%%", sentinel)
         .replace("%%LOG_PATH%%", str(log_path))
+        .replace("%%STATE_FILE%%", str(state_path))
         .replace("%%LANG%%", lang)
     )
 
@@ -60,6 +64,7 @@ class SessionPriming:
         self.sentinel = new_sentinel()
         self.log_path = data_dir / "logs" / f"bash-{session_key}.log"
         self.rc_path = data_dir / "profile" / f"rc-{session_key}"
+        self.state_path = data_dir / "profile" / f"state-{session_key}.sh"
 
     def render(self) -> RenderedRc:
         """Write the rendered rc to disk and return its handle."""
@@ -68,6 +73,7 @@ class SessionPriming:
         content = render_rc(
             sentinel=self.sentinel,
             log_path=self.log_path,
+            state_path=self.state_path,
         )
         self.rc_path.write_text(content, encoding="utf-8")
         return RenderedRc(path=self.rc_path, sentinel=self.sentinel)

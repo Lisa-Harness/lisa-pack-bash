@@ -108,6 +108,122 @@ async def test_invalid_params_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_command_and_commands_mutually_exclusive(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    ctx.parameters = {"command": "echo hi", "commands": ["echo a"]}
+    result = await bash_run.execute(ctx)
+    assert "Invalid parameters" in result.error
+
+
+@pytest.mark.asyncio
+async def test_commands_cap_enforced(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    ctx.parameters = {"commands": [f"echo {i}" for i in range(9)]}
+    result = await bash_run.execute(ctx)
+    assert "Invalid parameters" in result.error
+    assert "capped" in result.error
+
+
+@pytest.mark.asyncio
+async def test_backgrounded_short_circuit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
+
+    async def _fake_run_in_session(ctx, session, command, **kwargs):
+        return {
+            "backgrounded": True,
+            "job_id": "jabc123",
+            "log_path": str(tmp_path / "jabc123.log"),
+            "rc_path": str(tmp_path / "jabc123.rc"),
+            "status_path": str(tmp_path / "jabc123.status.json"),
+            "status": "running",
+            "sandboxed": False,
+        }
+
+    monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
+    ctx = _ctx(tmp_path, command="make build")
+    ctx.parameters["run_in_background"] = True
+    result = await bash_run.execute(ctx)
+    assert result.error == ""
+    assert result.output_json["backgrounded"] is True
+    assert result.output_json["job_id"] == "jabc123"
+    assert result.output_json["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_batch_result_short_circuit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
+
+    async def _fake_batch(ctx, session, commands, **kwargs):
+        return {
+            "batch": True,
+            "when": "parallel",
+            "requested_when": "auto",
+            "results": [
+                {"index": 0, "command": commands[0], "stdout": "a", "return_code": 0},
+                {"index": 1, "command": commands[1], "stdout": "b", "return_code": 0},
+            ],
+            "return_code": 0,
+            "sandboxed": False,
+            "timed_out": False,
+            "truncated": False,
+            "note": "session cwd/env/functions unchanged",
+        }
+
+    monkeypatch.setattr(bash_run, "run_batch_in_session", _fake_batch)
+    ctx = _ctx(tmp_path)
+    ctx.parameters = {"commands": ["echo a", "echo b"]}
+    result = await bash_run.execute(ctx)
+    assert result.error == ""
+    assert result.output_json["batch"] is True
+    assert result.output_json["when"] == "parallel"
+    assert len(result.output_json["results"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_overlay_downgrades_to_serial(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_degraded", lambda: [])
+
+    seen: dict = {}
+
+    async def _fake_batch(ctx, session, commands, **kwargs):
+        seen["when"] = kwargs.get("when")
+        seen["persist"] = kwargs.get("persist")
+        return {
+            "batch": True,
+            "when": "serial",
+            "requested_when": kwargs.get("when"),
+            "reason": "overlay capture is per-call; parallel batch downgraded to serial",
+            "results": [
+                {"index": i, "command": c, "stdout": "", "return_code": 0}
+                for i, c in enumerate(commands)
+            ],
+            "return_code": 0,
+            "sandboxed": True,
+            "timed_out": False,
+            "truncated": False,
+            "note": "overlay capture is per-call; parallel batch downgraded to serial",
+        }
+
+    monkeypatch.setattr(bash_run, "run_batch_in_session", _fake_batch)
+    ctx = _ctx(tmp_path)
+    ctx.parameters = {
+        "commands": ["echo a", "echo b"],
+        "when": "parallel",
+        "persist": True,
+    }
+    result = await bash_run.execute(ctx)
+    assert result.error == ""
+    assert seen["when"] == "parallel"
+    assert seen["persist"] is True
+    assert result.output_json["when"] == "serial"
+    assert "overlay" in result.output_json["reason"]
+
+
+@pytest.mark.asyncio
 async def test_rc_recovers_truthful_exit_code(monkeypatch, tmp_path: Path) -> None:
     """Regression: failing commands must surface their real exit code.
 
