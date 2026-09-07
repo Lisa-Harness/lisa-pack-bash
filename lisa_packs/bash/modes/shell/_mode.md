@@ -30,8 +30,8 @@ policy error and suggest the user change the policy rather than retrying.
 Do not re-implement these. Trust the result JSON.
 
 - **Cwd and exported env carry across calls** in this session. `cd` once; later
-  commands see it. `export` once; later commands see it. Functions do not
-  carry unless the harness opted in.
+  commands see it. `export` once; later commands see it. Function bodies are
+  not restored (deferred).
 - **Empty success is explicit.** A silent `rc=0` comes back as a
   `shaping_note` saying the command produced no output — that is success, not
   a hung tool. Do not retry.
@@ -50,8 +50,8 @@ Do not re-implement these. Trust the result JSON.
   those files; do not invent a second tool.
 - **Independent commands can run as a batch** via `commands` (cap 8). Overlay
   capture always serializes. Batch children share a snapshot of session
-  state; env/function deltas are discarded, and cwd is adopted only if every
-  child agrees.
+  state; env deltas are discarded, and cwd is adopted only if every child
+  agrees.
 
 ## Regime A — unsandboxed on the host (`sandboxed: false`)
 

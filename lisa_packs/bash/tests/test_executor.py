@@ -59,9 +59,10 @@ def test_parse_output_captures_state_lines() -> None:
     assert parsed.return_code == 0
     assert parsed.state["cwd"] == "/home/adam"
     assert parsed.state["exported"] == {"FOO": "bar", "QUOTED": "hello world"}
-    assert parsed.state["funcs"] == ["myfn", "otherfn"]
+    assert "funcs" not in parsed.state
     assert "state=" not in parsed.body
     assert "var " not in parsed.body
+    assert "funcs " not in parsed.body
 
 
 def test_parse_output_tolerates_missing_pipe_and_state() -> None:

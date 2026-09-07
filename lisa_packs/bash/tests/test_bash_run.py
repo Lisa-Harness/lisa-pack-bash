@@ -168,7 +168,7 @@ async def test_batch_result_short_circuit(monkeypatch, tmp_path: Path) -> None:
             "sandboxed": False,
             "timed_out": False,
             "truncated": False,
-            "note": "session cwd/env/functions unchanged",
+            "note": "session cwd/env unchanged",
         }
 
     monkeypatch.setattr(bash_run, "run_batch_in_session", _fake_batch)

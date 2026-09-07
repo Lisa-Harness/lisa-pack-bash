@@ -194,14 +194,14 @@ def _parse_output(raw: str, sentinel: str) -> ParsedOutput:
     - ``<sentinel>rc=N pipe=a b c`` — exit status + per-stage pipe statuses.
     - ``<sentinel>state=cwd=<q>`` — the post-command working directory.
     - ``<sentinel>var NAME=<q>`` — one exported variable added this command.
-    - ``<sentinel>funcs f1 f2...`` — function names defined this command.
+    Leftover ``<sentinel>funcs ...`` lines (from older wrappers) are dropped
+    so they cannot leak into model stdout; function-body carryover is deferred.
     Anything else is user output.
     """
     return_code: int | None = None
     pipe_statuses: list[int] = []
     cwd = ""
     exported: dict[str, str] = {}
-    funcs: list[str] = []
     lines: list[str] = []
     for line in raw.splitlines():
         match = _RC_MARKER.match(line)
@@ -222,7 +222,7 @@ def _parse_output(raw: str, sentinel: str) -> ParsedOutput:
             continue
         funcs_match = _STATE_FUNCS.match(line)
         if funcs_match and sentinel.strip() in funcs_match.group("sentinel"):
-            funcs = [f for f in funcs_match.group("funcs").split() if f]
+            # Drop leftover marker lines; do not persist function names.
             continue
         # Drop prompt echo lines that are just the sentinel.
         if line.strip() == sentinel.strip():
@@ -238,8 +238,6 @@ def _parse_output(raw: str, sentinel: str) -> ParsedOutput:
         state["cwd"] = cwd
     if exported:
         state["exported"] = exported
-    if funcs:
-        state["funcs"] = funcs
     return ParsedOutput(
         body=body.strip("\n"),
         return_code=return_code,
@@ -774,7 +772,6 @@ async def run_in_session(
             session.record_post_run_state(
                 cwd=cwd,
                 exported=parsed.state.get("exported") or {},
-                func_names=parsed.state.get("funcs") or [],
             )
     if cwd:
         result["cwd"] = cwd
@@ -802,8 +799,8 @@ async def run_batch_in_session(
     """Run ``commands`` against a snapshot of session state.
 
     Parallel is the default in bare/ephemeral/readonly regimes; overlay
-    capture always serializes. Env/function deltas from children are
-    discarded; cwd is adopted only when every child agrees.
+    capture always serializes. Env deltas from children are discarded;
+    cwd is adopted only when every child agrees.
     """
     if not commands:
         return {"error": "commands must be a non-empty list"}
@@ -857,12 +854,12 @@ async def run_batch_in_session(
         session.apply_cwd(cwds[0])
         notes.append(
             f"cwd adopted ({cwds[0]}) because every command agreed; "
-            "env/function deltas from the batch were discarded"
+            "env deltas from the batch were discarded"
         )
     else:
         notes.append(
-            "session cwd/env/functions unchanged (batch ran against a snapshot; "
-            "env/function deltas discarded"
+            "session cwd/env unchanged (batch ran against a snapshot; "
+            "env deltas discarded"
             + ("" if not cwds else "; child cwds disagreed")
             + ")"
         )

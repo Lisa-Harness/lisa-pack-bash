@@ -35,7 +35,7 @@ class Parameters(BaseModel):
             f"{MAX_BATCH_COMMANDS}). Mutually exclusive with `command`. "
             "Prefer this for independent read-only fan-outs; in-shell `&`/`wait` "
             "is still the tool for data-parallel work inside one command. "
-            "Batch children share a snapshot of session state; env/function "
+            "Batch children share a snapshot of session state; env "
             "deltas are discarded, and cwd is adopted only if every child agrees."
         ),
     )

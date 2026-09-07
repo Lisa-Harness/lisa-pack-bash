@@ -10,7 +10,6 @@ host and every result is stamped ``sandboxed: false`` (visible, not silent).
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import hashlib
 import json
 import logging
@@ -51,25 +50,22 @@ def bash_available() -> bool:
     return shutil.which(_BASH_BIN) is not None
 
 
-#: Default state-carryover policy: cwd and env always carry; functions are
-#: opt-in via `pack_config["session_state"]["functions"]` (the harness is the
-#: policy owner; the model cannot forge it).
+#: Default state-carryover policy: cwd and env always carry.
+#: Function-body replay is deferred (a names-only `# carry:func:` stub was
+#: never enough to restore `declare -f` bodies). Unknown keys on the
+#: pack_config override are ignored so this remains a stable extension point.
 _DEFAULT_SESSION_STATE = {
     "cwd": True,
     "env": True,
-    "functions": "off",
-    "function_allow": [],
-    "function_block": [],
 }
 
 
 def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
     """Resolve the session-state carryover policy for this ctx.
 
-    Floor default: cwd+env always carry. Functions are off unless the
-    harness opts in via ``session_state.functions`` (``"allowlist"`` /
-    ``"blocklist"`` plus ``function_allow``/``function_block`` globs).
-    Unknown keys are ignored so the policy is a stable extension point.
+    Floor default: cwd+env always carry. Function bodies are not restored
+    (deferred). Unknown keys are ignored so the policy is a stable
+    extension point.
     """
     policy = dict(_DEFAULT_SESSION_STATE)
     pack_config = getattr(ctx, "pack_config", None)
@@ -82,13 +78,6 @@ def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
         policy["cwd"] = False
     if override.get("env") is False:
         policy["env"] = False
-    functions = override.get("functions")
-    if functions in ("allowlist", "blocklist", "off"):
-        policy["functions"] = functions
-    for key in ("function_allow", "function_block"):
-        value = override.get(key)
-        if isinstance(value, list):
-            policy[key] = [p for p in value if isinstance(p, str)]
     return policy
 
 
@@ -196,7 +185,6 @@ class BashSession:
         priming: SessionPriming,
         sandboxed: bool,
         initial_env: frozenset[str] | None = None,
-        initial_funcs: frozenset[str] | None = None,
         state_policy: dict[str, Any] | None = None,
     ) -> None:
         self.session_key = session_key
@@ -207,11 +195,10 @@ class BashSession:
         # Job registry: backgrounded commands tracked by id. Values are
         # host-side asyncio.Tasks; artifacts live under jobs_dir.
         self.jobs: dict[str, asyncio.Task] = {}
-        # Baseline: what the rc already exports/defines before the model ever
-        # runs anything. A carryover delta is computed against this so the rc's
+        # Baseline: what the rc already exports before the model ever runs
+        # anything. A carryover delta is computed against this so the rc's
         # own exports (LANG, TERM, NO_COLOR…) aren't treated as state to replay.
         self._base_env: frozenset[str] = initial_env or frozenset()
-        self._base_funcs: frozenset[str] = initial_funcs or frozenset()
         self._state_policy: dict[str, Any] = dict(
             _DEFAULT_SESSION_STATE, **(state_policy or {})
         )
@@ -226,7 +213,6 @@ class BashSession:
         *,
         cwd: str,
         exported: dict[str, str],
-        func_names: list[str],
     ) -> None:
         """Persist the per-call state capture to the replay file.
 
@@ -234,6 +220,8 @@ class BashSession:
         rc source replays it. Only the delta against the baseline is replayed:
         rc-managed exports (LANG, TERM…) are excluded so a second source of
         the state file cannot clobber the rc's own exports.
+
+        Function bodies are not written here — that carryover is deferred.
         """
         lines: list[str] = ["# Auto-managed by lisa bash pack. Do not edit."]
         if self._state_policy["cwd"] and cwd and cwd != ".":
@@ -242,18 +230,6 @@ class BashSession:
             for name, value in sorted(exported.items()):
                 if name and name not in self._base_env:
                     lines.append(f"export {name}={shlex.quote(value)}")
-        if self._state_policy["functions"] != "off":
-            allow: list[str] = self._state_policy["function_allow"]
-            block: list[str] = self._state_policy["function_block"]
-            for name in func_names:
-                if (
-                    name
-                    and name not in self._base_funcs
-                    and self._fn_included(name, allow, block)
-                ):
-                    # Functions are marked for re-definition via a comment; the
-                    # actual bodies are re-sourced from the delta below.
-                    lines.append(f"# carry:func:{name}")
         path = self.priming.state_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,15 +238,6 @@ class BashSession:
             tmp.replace(path)
         except OSError as exc:
             logger.debug("bash: state file write failed (%s)", exc)
-
-    @staticmethod
-    def _fn_included(name: str, allow: list[str], block: list[str]) -> bool:
-        for pattern in block:
-            if fnmatch.fnmatch(name, pattern):
-                return False
-        if not allow:
-            return True
-        return any(fnmatch.fnmatch(name, pattern) for pattern in allow)
 
     def job_artifacts(self, job_id: str) -> tuple[Path, Path, Path]:
         """(log, rc, status) paths for one job under jobs_dir."""
@@ -322,10 +289,10 @@ class BashSession:
             logger.debug("bash: job status write failed (%s)", exc)
 
     def apply_cwd(self, cwd: str) -> None:
-        """Replace only the ``cd`` line in the state file, keeping env/functions.
+        """Replace only the ``cd`` line in the state file, keeping env exports.
 
-        Used after a batch: env/function deltas from children are discarded,
-        but a cwd every child agreed on is adopted.
+        Used after a batch: env deltas from children are discarded, but a cwd
+        every child agreed on is adopted.
         """
         if not self._state_policy["cwd"] or not cwd or cwd == ".":
             return
@@ -378,8 +345,8 @@ class BashSession:
 
         ``--rcfile`` is not honored by ``bash -c``, so the rc is sourced
         explicitly at the top of the wrapper. The rc in turn sources the
-        state file (cwd, exported vars, functions from the prior call), then
-        the model's command runs, then trailing printf state-emitters capture
+        state file (cwd and exported vars from the prior call), then the
+        model's command runs, then trailing printf state-emitters capture
         rc + PIPESTATUS + new exports (delta-filtered) for the next call.
         """
         self.ensure_primed()
@@ -399,16 +366,14 @@ class BashSession:
             '__lisa_pipe=${__lisa_rcpipe#*,}; '
             f"printf '\\n{marker}%s pipe=%s\\n' \"$__lisa_rc\" \"$__lisa_pipe\"; "
             # A separate state line powers session-wide carryover: cwd plus
-            # each new export on its own indented continuation line (so values
-            # containing spaces cannot break the parser), then function names.
-            # The host delta-filters against the rc baseline, so rc-managed
-            # exports (LANG, TERM…) are never replayed.
+            # each new export on its own line (so values containing spaces
+            # cannot break the parser). Function bodies are not captured
+            # (deferred). The host delta-filters against the rc baseline, so
+            # rc-managed exports (LANG, TERM…) are never replayed.
             f'printf \'%s\\n\' "{state_marker}cwd=$(printf \'%q\' "$PWD")"; '
             'compgen -A export 2>/dev/null | while IFS= read -r n; '
             f'do v="${{!n}}"; printf \'%svar %s=%q\\n\' '
             f'"{self.sentinel.strip()}" "$n" "$v"; done; '
-            'funcs=$(compgen -A function 2>/dev/null | tr \'\\n\' \' \'); '
-            f'printf \'%sfuncs %s\\n\' "{self.sentinel.strip()}" "$funcs"; '
             'exit "$__lisa_rc"'
         )
         return [
@@ -465,19 +430,15 @@ def _write_containment_fact(session: BashSession) -> None:
         logger.debug("bash: containment fact write failed (%s)", exc)
 
 
-def _baseline_snapshot(rc_content: str) -> tuple[frozenset[str], frozenset[str]]:
-    """Run the rendered rc host-side once and capture its export/function set.
+def _baseline_snapshot(rc_content: str) -> frozenset[str]:
+    """Run the rendered rc host-side once and capture its export set.
 
     One extra subprocess per session is a cheap price for a delta that
-    excludes the rc's own exports from replay. Falls back to empty sets on
+    excludes the rc's own exports from replay. Falls back to an empty set on
     failure — the session still works, it just replays more than strictly
     needed.
     """
-    probe = (
-        rc_content
-        + '\nprintf "__ENV__\\n"; compgen -A export 2>/dev/null'
-        + '\nprintf "__FUNCS__\\n"; compgen -A function 2>/dev/null\n'
-    )
+    probe = rc_content + '\nprintf "__ENV__\\n"; compgen -A export 2>/dev/null\n'
     try:
         import subprocess
 
@@ -489,24 +450,17 @@ def _baseline_snapshot(rc_content: str) -> tuple[frozenset[str], frozenset[str]]
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
-        return frozenset(), frozenset()
+        return frozenset()
     env: set[str] = set()
-    funcs: set[str] = set()
-    section: str | None = None
+    in_env = False
     for line in result.stdout.splitlines():
         if line == "__ENV__":
-            section = "env"
+            in_env = True
             continue
-        if line == "__FUNCS__":
-            section = "funcs"
-            continue
-        if section == "env":
+        if in_env:
             env.add(line.strip())
-        elif section == "funcs":
-            funcs.add(line.strip())
     env.discard("")
-    funcs.discard("")
-    return frozenset(env), frozenset(funcs)
+    return frozenset(env)
 
 
 def resolve_or_create_session(
@@ -528,14 +482,13 @@ def resolve_or_create_session(
     data_dir = Path(ctx.data_dir) if ctx.data_dir else Path.home() / ".lisa"
     priming = SessionPriming(data_dir=data_dir, session_key=key)
     rc_content = priming.render()
-    env, funcs = _baseline_snapshot(rc_content.path.read_text(encoding="utf-8"))
+    env = _baseline_snapshot(rc_content.path.read_text(encoding="utf-8"))
     session = BashSession(
         session_key=key,
         data_dir=data_dir,
         priming=priming,
         sandboxed=_sandbox_available() if sandboxed is None else sandboxed,
         initial_env=env,
-        initial_funcs=funcs,
         state_policy=_session_state_policy(ctx),
     )
     _SESSIONS[key] = session
