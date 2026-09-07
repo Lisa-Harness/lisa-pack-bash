@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+
 from lisa_packs.bash import executor
 
 
@@ -72,6 +74,34 @@ def test_parse_output_tolerates_missing_pipe_and_state() -> None:
     assert parsed.return_code == 0
     assert parsed.pipe_statuses == []
     assert parsed.state == {}
+
+
+def test_parse_output_captures_base64_function_bodies() -> None:
+    sentinel = "LISA_FN>> "
+    body = "myfn() {\n  echo inner\n}"
+    b64 = base64.b64encode(body.encode("utf-8")).decode("ascii")
+    raw = (
+        f"{sentinel}func myfn {b64}\n"
+        f"{sentinel}state=cwd=/tmp\n"
+        f"{sentinel}var FOO=bar\n"
+        f"{sentinel}rc=0\n"
+    )
+    parsed = executor._parse_output(raw, sentinel)
+    assert parsed.return_code == 0
+    assert parsed.state["functions"] == {"myfn": body}
+    assert "func " not in parsed.body
+    assert "echo inner" not in parsed.body
+
+
+def test_parse_output_drops_corrupt_base64_function_marker() -> None:
+    sentinel = "LISA_FN>> "
+    # Emitted format is `<SENTINEL>func NAME <b64>` with no space after the
+    # stripped sentinel; a non-base64 payload must be dropped, not leaked.
+    raw = f"{sentinel.strip()}func broken !!!notb64!!!\n{sentinel}rc=0\n"
+    parsed = executor._parse_output(raw, sentinel)
+    assert parsed.return_code == 0
+    assert "functions" not in parsed.state
+    assert "func broken" not in parsed.body
 
 
 def test_shape_empty_output_returns_explicit_note() -> None:

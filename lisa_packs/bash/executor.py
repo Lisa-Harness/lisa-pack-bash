@@ -10,7 +10,10 @@ boundary; the composed path reports its backend transparently).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import re
+import secrets
 import shlex
 from pathlib import Path
 from typing import Any
@@ -38,9 +41,16 @@ MAX_SPILL_BYTES = 64 * 1024 * 1024
 #: Hard cap for ``commands`` in one bash_run call.
 MAX_BATCH_COMMANDS = 8
 
+#: Extra seconds granted to the sandboxed child (bwrap_run) over the model's
+#: timeout, so auto-backgrounded sandboxed work keeps running well past the
+#: point the model stopped waiting. Capped at bwrap_run's 3600s ceiling.
+_AUTO_BG_GRACE_SECONDS = 600
+_AUTO_BG_MAX_TIMEOUT_SECONDS = 3600
+
 _RC_MARKER = re.compile(r"^(?P<sentinel>.+?)rc=(?P<rc>\d+)(?:\spipe=(?P<pipe>[0-9 ]+))?$")
 _STATE_CWD = re.compile(r"^(?P<sentinel>.+?)state=cwd=(?P<cwd>.*)$")
 _STATE_VAR = re.compile(r"^(?P<sentinel>.+?)var (?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)$")
+_STATE_FUNC = re.compile(r"^(?P<sentinel>.+?)func (?P<name>[A-Za-z_][A-Za-z0-9_]*) (?P<b64>[A-Za-z0-9+/=]+)$")
 _STATE_FUNCS = re.compile(r"^(?P<sentinel>.+?)funcs (?P<funcs>.*)$")
 
 #: Commands whose exit code 1 is an informational answer, not a failure
@@ -62,7 +72,7 @@ class ParsedOutput:
         body: str,
         return_code: int | None,
         pipe_statuses: list[int] | None = None,
-        state: dict[str, str] | None = None,  # noqa: ARG002 - reserved for phase 2
+        state: dict[str, Any] | None = None,
     ) -> None:
         self.body = body
         self.return_code = return_code
@@ -158,6 +168,19 @@ def is_auto_background_guarded(command: str) -> bool:
     return "git" in tokens
 
 
+def _auto_bg_bwrap_timeout(model_timeout_seconds: int) -> int:
+    """bwrap_run timeout granted to auto-background candidates.
+
+    The model's timeout stays the user-visible wait; the child gets a grace
+    window past it so backgrounded work keeps making progress. Capped at
+    bwrap_run's 3600s parameter ceiling.
+    """
+    return min(
+        max(model_timeout_seconds, 1) + _AUTO_BG_GRACE_SECONDS,
+        _AUTO_BG_MAX_TIMEOUT_SECONDS,
+    )
+
+
 def resolve_batch_schedule(
     requested: str,
     *,
@@ -194,14 +217,18 @@ def _parse_output(raw: str, sentinel: str) -> ParsedOutput:
     - ``<sentinel>rc=N pipe=a b c`` — exit status + per-stage pipe statuses.
     - ``<sentinel>state=cwd=<q>`` — the post-command working directory.
     - ``<sentinel>var NAME=<q>`` — one exported variable added this command.
+    - ``<sentinel>func NAME <b64>`` — one function definition, base64-encoded
+      so multi-line bodies stay on a single parseable line. Decoded bodies
+      land in ``state['functions']``; the host applies the carryover policy.
     Leftover ``<sentinel>funcs ...`` lines (from older wrappers) are dropped
-    so they cannot leak into model stdout; function-body carryover is deferred.
+    so they cannot leak into model stdout.
     Anything else is user output.
     """
     return_code: int | None = None
     pipe_statuses: list[int] = []
     cwd = ""
     exported: dict[str, str] = {}
+    functions: dict[str, str] = {}
     lines: list[str] = []
     for line in raw.splitlines():
         match = _RC_MARKER.match(line)
@@ -219,6 +246,19 @@ def _parse_output(raw: str, sentinel: str) -> ParsedOutput:
             value = var_match.group("value").strip()
             # printf %q emits a bare token unless quoting is needed.
             exported[var_match.group("name")] = value.strip("'\"")
+            continue
+        func_match = _STATE_FUNC.match(line)
+        if func_match and sentinel.strip() in func_match.group("sentinel"):
+            try:
+                body = base64.b64decode(func_match.group("b64")).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                # Corrupt capture must never poison the session state.
+                continue
+            functions[func_match.group("name")] = body
+            continue
+        if line.startswith(f"{sentinel.strip()}func "):
+            # Malformed function marker (unparseable name/payload): drop it
+            # rather than leak sentinel noise into model stdout.
             continue
         funcs_match = _STATE_FUNCS.match(line)
         if funcs_match and sentinel.strip() in funcs_match.group("sentinel"):
@@ -238,6 +278,8 @@ def _parse_output(raw: str, sentinel: str) -> ParsedOutput:
         state["cwd"] = cwd
     if exported:
         state["exported"] = exported
+    if functions:
+        state["functions"] = functions
     return ParsedOutput(
         body=body.strip("\n"),
         return_code=return_code,
@@ -287,7 +329,6 @@ async def _run_process(
 
         spill_dir = Path(tempfile.gettempdir()) / "lisa-bash-spill"
     spill_dir.mkdir(parents=True, exist_ok=True)
-    import secrets
 
     stamp = secrets.token_hex(4)
     stdout_path = spill_dir / f"stdout-{stamp}.log"
@@ -398,6 +439,35 @@ async def _run_via_bwrap(
     return payload
 
 
+def _publish_job_done(
+    ctx: ToolExecutionContext,
+    *,
+    job_id: str,
+    rc: int | None,
+    killed: bool,
+    log_path: Path,
+    command: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort job completion event on the session event bus."""
+    bus = getattr(ctx, "event_bus", None)
+    if bus is None or not hasattr(bus, "publish"):
+        return
+    payload: dict[str, Any] = {
+        "job_id": job_id,
+        "rc": rc,
+        "killed": killed,
+        "log_path": str(log_path),
+        "command": command[:200],
+    }
+    if extra:
+        payload.update(extra)
+    try:
+        asyncio.create_task(bus.publish("lisa.bash.job_done", payload))
+    except Exception:
+        pass
+
+
 async def _run_background_command(
     ctx: ToolExecutionContext,
     session: BashSession,
@@ -478,25 +548,14 @@ async def _run_background_command(
             pass
     finally:
         session.complete_job(job_id, rc=rc, killed=killed)
-        bus = getattr(ctx, "event_bus", None)
-        if bus is not None and hasattr(bus, "publish"):
-            try:
-                import asyncio as _a
-
-                _a.create_task(
-                    bus.publish(
-                        "lisa.bash.job_done",
-                        {
-                            "job_id": job_id,
-                            "rc": rc,
-                            "killed": killed,
-                            "log_path": str(log_path),
-                            "command": command[:200],
-                        },
-                    )
-                )
-            except Exception:
-                pass
+        _publish_job_done(
+            ctx,
+            job_id=job_id,
+            rc=rc,
+            killed=killed,
+            log_path=log_path,
+            command=command,
+        )
 
 
 async def _run_process_with_auto_background(
@@ -524,8 +583,6 @@ async def _run_process_with_auto_background(
     )
     assert process.stdout is not None
     assert process.stderr is not None
-    import secrets
-
     stamp = secrets.token_hex(4)
     stdout_path = spill_dir / f"stdout-{stamp}.log"
     stderr_path = spill_dir / f"stderr-{stamp}.log"
@@ -560,23 +617,15 @@ async def _run_process_with_auto_background(
             except OSError:
                 pass
             session.complete_job(job_id, rc=rc, killed=False)
-            bus = getattr(ctx, "event_bus", None)
-            if bus is not None and hasattr(bus, "publish"):
-                try:
-                    asyncio.create_task(
-                        bus.publish(
-                            "lisa.bash.job_done",
-                            {
-                                "job_id": job_id,
-                                "rc": rc,
-                                "auto_backgrounded": True,
-                                "log_path": str(log_path),
-                                "command": command[:200],
-                            },
-                        )
-                    )
-                except Exception:
-                    pass
+            _publish_job_done(
+                ctx,
+                job_id=job_id,
+                rc=rc,
+                killed=False,
+                log_path=log_path,
+                command=command,
+                extra={"auto_backgrounded": True},
+            )
 
         collector = asyncio.create_task(_collect(), name=f"lisa-bash-job-{job_id}")
         session.register_job(job_id, collector)
@@ -631,8 +680,6 @@ async def run_in_session(
     inner_argv = session.build_inner_argv(command)
     job_id: str | None = None
     if run_in_background:
-        import secrets
-
         job_id = f"j{secrets.token_hex(6)}"
         log_path, rc_path, status_path = session.job_artifacts(job_id)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -659,14 +706,122 @@ async def run_in_session(
         }
     try:
         if session.sandboxed:
-            payload = await _run_via_bwrap(
-                ctx,
-                inner_argv,
-                timeout_seconds=max(timeout_seconds, 1) + 30,
-                overrides=overrides or {},
-                persist=persist,
-                layer_id=layer_id,
-            )
+            if not is_auto_background_guarded(command):
+                # Sandboxed auto-background: grant the child a generous grace
+                # window past the model's timeout and race it. On timeout the
+                # still-running bwrap task is adopted as a job instead of
+                # killed - --die-with-parent only ties the child to THIS host
+                # process, so keeping the task alive keeps the work running
+                # (and lets overlay capture complete).
+                bwrap_task = asyncio.create_task(
+                    _run_via_bwrap(
+                        ctx,
+                        inner_argv,
+                        timeout_seconds=_auto_bg_bwrap_timeout(timeout_seconds),
+                        overrides=overrides or {},
+                        persist=persist,
+                        layer_id=layer_id,
+                    ),
+                    name="lisa-bash-sandboxed-fg",
+                )
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(bwrap_task), timeout=timeout_seconds
+                    )
+                except TimeoutError:
+                    job_id = f"j{secrets.token_hex(6)}"
+                    log_path, rc_path, status_path = session.job_artifacts(job_id)
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    async def _collect_sandboxed() -> None:
+                        """Adopt the in-flight sandboxed call as a job."""
+                        rc = -1
+                        killed = False
+                        try:
+                            bg_payload = await bwrap_task
+                            stdout_raw = bg_payload.get("stdout_raw", "")
+                            stderr = bg_payload.get("stderr", "")
+                            timed_out = bool(bg_payload.get("timed_out"))
+                            bg_parsed = _parse_output(stdout_raw, session.sentinel)
+                            rc = bg_payload.get("return_code")
+                            if rc is None:
+                                rc = (
+                                    bg_parsed.return_code
+                                    if bg_parsed.return_code is not None
+                                    else -1
+                                )
+                            killed = timed_out
+                            sandbox_error = bg_payload.get("error") or ""
+                        except Exception as exc:  # noqa: BLE001 - jobs must not crash the session
+                            sandbox_error = str(exc)
+                            try:
+                                with log_path.open("a", encoding="utf-8") as handle:
+                                    handle.write(f"$ {command}\n[bash-job error] {exc}\n")
+                            except OSError:
+                                pass
+                        else:
+                            try:
+                                log_path.parent.mkdir(parents=True, exist_ok=True)
+                                with log_path.open("a", encoding="utf-8") as handle:
+                                    handle.write(f"$ {command}\n")
+                                    if sandbox_error:
+                                        handle.write(f"[bash-job error] {sandbox_error}\n")
+                                    if stdout_raw:
+                                        handle.write(stdout_raw + "\n")
+                                    if stderr:
+                                        handle.write(
+                                            "[stderr] "
+                                            + stderr.replace("\n", "\n[stderr] ")
+                                            + "\n"
+                                        )
+                                    handle.write(
+                                        f"[rc={rc} timed_out={timed_out} "
+                                        f"auto_backgrounded=1 job={job_id}]\n"
+                                    )
+                            except OSError:
+                                pass
+                        try:
+                            rc_path.write_text(str(rc), encoding="utf-8")
+                        except OSError:
+                            pass
+                        session.complete_job(job_id, rc=rc, killed=killed)
+                        _publish_job_done(
+                            ctx,
+                            job_id=job_id,
+                            rc=rc,
+                            killed=killed,
+                            log_path=log_path,
+                            command=command,
+                            extra={"auto_backgrounded": True},
+                        )
+
+                    collector = asyncio.create_task(
+                        _collect_sandboxed(), name=f"lisa-bash-job-{job_id}"
+                    )
+                    session.register_job(job_id, collector)
+                    return {
+                        "backgrounded": True,
+                        "auto_backgrounded_on_timeout": True,
+                        "job_id": job_id,
+                        "log_path": str(log_path),
+                        "rc_path": str(rc_path),
+                        "status_path": str(status_path),
+                        "status": "running",
+                        "timeout_seconds": timeout_seconds,
+                        "command": command,
+                        "sandboxed": True,
+                        "background_jobs": session.jobs_summary(),
+                    }
+                payload = bwrap_task.result()
+            else:
+                payload = await _run_via_bwrap(
+                    ctx,
+                    inner_argv,
+                    timeout_seconds=max(timeout_seconds, 1) + 30,
+                    overrides=overrides or {},
+                    persist=persist,
+                    layer_id=layer_id,
+                )
             if "error" in payload and payload["error"]:
                 # The sandbox itself reported a failure (e.g. bwrap missing on
                 # this host): surface it with the sandbox stamp and any reason
@@ -705,8 +860,8 @@ async def run_in_session(
             if payload.get("degraded"):
                 result["degraded"] = True
                 result["note"] = payload.get("note")
-            # Auto-background on sandbox timeout is not supported in this phase;
-            # bwrap_run already applies its own longer timeout before ours.
+            # Guarded sandboxed commands (sleep / git) keep the plain T+30s
+            # bwrap timeout: bounded work is killed, never backgrounded.
         else:
             # Bare path: auto-background on timeout unless the command is
             # guarded (e.g. `sleep` deliberately waits; `git` mutates shared
@@ -772,6 +927,7 @@ async def run_in_session(
             session.record_post_run_state(
                 cwd=cwd,
                 exported=parsed.state.get("exported") or {},
+                functions=parsed.state.get("functions") or {},
             )
     if cwd:
         result["cwd"] = cwd
@@ -799,8 +955,8 @@ async def run_batch_in_session(
     """Run ``commands`` against a snapshot of session state.
 
     Parallel is the default in bare/ephemeral/readonly regimes; overlay
-    capture always serializes. Env deltas from children are discarded;
-    cwd is adopted only when every child agrees.
+    capture always serializes. Env and function deltas from children are
+    discarded; cwd is adopted only when every child agrees.
     """
     if not commands:
         return {"error": "commands must be a non-empty list"}
@@ -854,12 +1010,12 @@ async def run_batch_in_session(
         session.apply_cwd(cwds[0])
         notes.append(
             f"cwd adopted ({cwds[0]}) because every command agreed; "
-            "env deltas from the batch were discarded"
+            "env and function deltas from the batch were discarded"
         )
     else:
         notes.append(
             "session cwd/env unchanged (batch ran against a snapshot; "
-            "env deltas discarded"
+            "env/function deltas discarded"
             + ("" if not cwds else "; child cwds disagreed")
             + ")"
         )

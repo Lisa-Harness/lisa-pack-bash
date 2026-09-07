@@ -10,6 +10,7 @@ host and every result is stamped ``sandboxed: false`` (visible, not silent).
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import hashlib
 import json
 import logging
@@ -50,22 +51,37 @@ def bash_available() -> bool:
     return shutil.which(_BASH_BIN) is not None
 
 
-#: Default state-carryover policy: cwd and env always carry.
-#: Function-body replay is deferred (a names-only `# carry:func:` stub was
-#: never enough to restore `declare -f` bodies). Unknown keys on the
-#: pack_config override are ignored so this remains a stable extension point.
+#: Default state-carryover policy: cwd and env always carry. Function-body
+#: replay is opt-in via ``pack_config["session_state"]``:
+#: ``{"functions": "off" | "allowlist" | "blocklist", "patterns": [...]}``.
+#: ``allowlist`` replays only functions whose name matches a ``patterns``
+#: fnmatch glob; ``blocklist`` replays everything except matches. Unknown
+#: keys on the pack_config override are ignored so this remains a stable
+#: extension point.
 _DEFAULT_SESSION_STATE = {
     "cwd": True,
     "env": True,
+    "functions": "off",
+    "patterns": [],
 }
+
+_FUNCTIONS_MODES = ("off", "allowlist", "blocklist")
+
+#: Header line of every host-written state file (also used to detect it).
+_STATE_HEADER = "# Auto-managed by lisa bash pack. Do not edit."
+#: Section marker introducing the function-replay part of the state file.
+#: ``apply_cwd`` never edits lines at-or-below this marker, so a function
+#: body that itself contains a ``cd`` statement survives cwd adoption.
+_FUNCTIONS_SECTION = "# === lisa function replay ==="
 
 
 def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
     """Resolve the session-state carryover policy for this ctx.
 
-    Floor default: cwd+env always carry. Function bodies are not restored
-    (deferred). Unknown keys are ignored so the policy is a stable
-    extension point.
+    Floor default: cwd+env always carry, functions do not replay. The pack
+    config may enable function replay (``functions`` mode + ``patterns``)
+    and may tighten cwd/env to off. Unknown keys are ignored so the policy
+    is a stable extension point.
     """
     policy = dict(_DEFAULT_SESSION_STATE)
     pack_config = getattr(ctx, "pack_config", None)
@@ -78,6 +94,14 @@ def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
         policy["cwd"] = False
     if override.get("env") is False:
         policy["env"] = False
+    functions_mode = override.get("functions")
+    if functions_mode in _FUNCTIONS_MODES:
+        policy["functions"] = functions_mode
+    patterns = override.get("patterns")
+    if isinstance(patterns, str):
+        policy["patterns"] = [patterns]
+    elif isinstance(patterns, list) and all(isinstance(p, str) for p in patterns):
+        policy["patterns"] = list(patterns)
     return policy
 
 
@@ -185,6 +209,7 @@ class BashSession:
         priming: SessionPriming,
         sandboxed: bool,
         initial_env: frozenset[str] | None = None,
+        initial_funcs: frozenset[str] | None = None,
         state_policy: dict[str, Any] | None = None,
     ) -> None:
         self.session_key = session_key
@@ -195,10 +220,12 @@ class BashSession:
         # Job registry: backgrounded commands tracked by id. Values are
         # host-side asyncio.Tasks; artifacts live under jobs_dir.
         self.jobs: dict[str, asyncio.Task] = {}
-        # Baseline: what the rc already exports before the model ever runs
-        # anything. A carryover delta is computed against this so the rc's
-        # own exports (LANG, TERM, NO_COLOR…) aren't treated as state to replay.
+        # Baseline: what the rc already exports/defines before the model ever
+        # runs anything. Carryover deltas are computed against these so the
+        # rc's own exports (LANG, TERM, NO_COLOR…) and functions aren't
+        # treated as state to replay.
         self._base_env: frozenset[str] = initial_env or frozenset()
+        self._base_funcs: frozenset[str] = initial_funcs or frozenset()
         self._state_policy: dict[str, Any] = dict(
             _DEFAULT_SESSION_STATE, **(state_policy or {})
         )
@@ -208,28 +235,56 @@ class BashSession:
         """Directory for job artifacts and spill files (host-visible)."""
         return self.data_dir / "jobs" / self.session_key
 
+    def _select_functions(self, functions: dict[str, str]) -> dict[str, str]:
+        """Apply the functions policy (off / allowlist / blocklist + patterns)."""
+        mode = self._state_policy.get("functions", "off")
+        if mode == "off" or not functions:
+            return {}
+        patterns = self._state_policy.get("patterns") or []
+
+        def _matches(name: str) -> bool:
+            return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+
+        if mode == "allowlist":
+            return {n: b for n, b in functions.items() if _matches(n)}
+        return {n: b for n, b in functions.items() if not _matches(n)}
+
     def record_post_run_state(
         self,
         *,
         cwd: str,
         exported: dict[str, str],
+        functions: dict[str, str] | None = None,
     ) -> None:
         """Persist the per-call state capture to the replay file.
 
         The host (not the shell in-sandbox) writes this file, then the next
         rc source replays it. Only the delta against the baseline is replayed:
-        rc-managed exports (LANG, TERM…) are excluded so a second source of
-        the state file cannot clobber the rc's own exports.
-
-        Function bodies are not written here — that carryover is deferred.
+        rc-managed exports (LANG, TERM…) and rc-defined functions are excluded
+        so a second source of the state file cannot clobber the rc's own
+        definitions. Function bodies replay per the session policy (off by
+        default; allowlist/blocklist + fnmatch patterns via pack_config).
         """
-        lines: list[str] = ["# Auto-managed by lisa bash pack. Do not edit."]
+        lines: list[str] = [_STATE_HEADER]
         if self._state_policy["cwd"] and cwd and cwd != ".":
             lines.append(f"cd {shlex.quote(cwd)}")
         if self._state_policy["env"]:
             for name, value in sorted(exported.items()):
                 if name and name not in self._base_env:
                     lines.append(f"export {name}={shlex.quote(value)}")
+        selected = self._select_functions(
+            {
+                name: body
+                for name, body in (functions or {}).items()
+                if name and name not in self._base_funcs
+            }
+        )
+        if selected:
+            lines.append(_FUNCTIONS_SECTION)
+            for name in sorted(selected):
+                body = (selected[name] or "").rstrip()
+                if body:
+                    lines.append(body)
         path = self.priming.state_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -289,10 +344,11 @@ class BashSession:
             logger.debug("bash: job status write failed (%s)", exc)
 
     def apply_cwd(self, cwd: str) -> None:
-        """Replace only the ``cd`` line in the state file, keeping env exports.
+        """Replace only the ``cd`` line in the state file, keeping the rest.
 
-        Used after a batch: env deltas from children are discarded, but a cwd
-        every child agreed on is adopted.
+        Used after a batch: env/function deltas from children are discarded,
+        but a cwd every child agreed on is adopted. Lines in the function
+        section are never touched — a body may legitimately contain a ``cd``.
         """
         if not self._state_policy["cwd"] or not cwd or cwd == ".":
             return
@@ -301,15 +357,21 @@ class BashSession:
             existing = (
                 path.read_text(encoding="utf-8")
                 if path.is_file()
-                else "# Auto-managed by lisa bash pack. Do not edit.\n"
+                else _STATE_HEADER + "\n"
             )
-            lines = [ln for ln in existing.splitlines() if not ln.startswith("cd ")]
-            if not lines:
-                lines = ["# Auto-managed by lisa bash pack. Do not edit."]
-            lines.append(f"cd {shlex.quote(cwd)}")
+            lines = existing.splitlines()
+            split_at = (
+                lines.index(_FUNCTIONS_SECTION)
+                if _FUNCTIONS_SECTION in lines
+                else len(lines)
+            )
+            head = [ln for ln in lines[:split_at] if not ln.startswith("cd ")]
+            if not head:
+                head = [_STATE_HEADER]
+            head.insert(1, f"cd {shlex.quote(cwd)}")
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".sh.tmp")
-            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tmp.write_text("\n".join(head + lines[split_at:]) + "\n", encoding="utf-8")
             tmp.replace(path)
         except OSError as exc:
             logger.debug("bash: cwd apply failed (%s)", exc)
@@ -345,9 +407,11 @@ class BashSession:
 
         ``--rcfile`` is not honored by ``bash -c``, so the rc is sourced
         explicitly at the top of the wrapper. The rc in turn sources the
-        state file (cwd and exported vars from the prior call), then the
-        model's command runs, then trailing printf state-emitters capture
-        rc + PIPESTATUS + new exports (delta-filtered) for the next call.
+        state file (cwd, exported vars, and policy-permitted function bodies
+        from the prior call), then the model's command runs, then trailing
+        printf state-emitters capture rc + PIPESTATUS + new exports
+        (delta-filtered) and function bodies (base64, one line each) for the
+        next call; the host applies the carryover policy.
         """
         self.ensure_primed()
         rc_path = self.priming.rc_path
@@ -367,10 +431,19 @@ class BashSession:
             f"printf '\\n{marker}%s pipe=%s\\n' \"$__lisa_rc\" \"$__lisa_pipe\"; "
             # A separate state line powers session-wide carryover: cwd plus
             # each new export on its own line (so values containing spaces
-            # cannot break the parser). Function bodies are not captured
-            # (deferred). The host delta-filters against the rc baseline, so
-            # rc-managed exports (LANG, TERM…) are never replayed.
+            # cannot break the parser). Function bodies are emitted as base64
+            # on ONE line each so multi-line bodies cannot break the
+            # line-oriented parser; the host decodes, policy-filters, and
+            # replays them via the state file. The host delta-filters against
+            # the rc baseline, so rc-managed exports (LANG, TERM…) are never
+            # replayed.
             f'printf \'%s\\n\' "{state_marker}cwd=$(printf \'%q\' "$PWD")"; '
+            'if command -v base64 >/dev/null 2>&1; then '
+            'compgen -A function 2>/dev/null | while IFS= read -r __lisa_fn; do '
+            '[ -n "$__lisa_fn" ] || continue; '
+            f'printf \'%sfunc %s %s\\n\' "{self.sentinel.strip()}" "$__lisa_fn" '
+            '"$(declare -f "$__lisa_fn" | base64 | tr -d \'\\n\')"; '
+            'done; fi; '
             'compgen -A export 2>/dev/null | while IFS= read -r n; '
             f'do v="${{!n}}"; printf \'%svar %s=%q\\n\' '
             f'"{self.sentinel.strip()}" "$n" "$v"; done; '
@@ -430,15 +503,19 @@ def _write_containment_fact(session: BashSession) -> None:
         logger.debug("bash: containment fact write failed (%s)", exc)
 
 
-def _baseline_snapshot(rc_content: str) -> frozenset[str]:
-    """Run the rendered rc host-side once and capture its export set.
+def _baseline_snapshot(rc_content: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Run the rendered rc host-side once; capture its export + function sets.
 
     One extra subprocess per session is a cheap price for a delta that
-    excludes the rc's own exports from replay. Falls back to an empty set on
-    failure — the session still works, it just replays more than strictly
-    needed.
+    excludes the rc's own exports and functions from replay. Falls back to
+    empty sets on failure — the session still works, it just replays more
+    than strictly needed.
     """
-    probe = rc_content + '\nprintf "__ENV__\\n"; compgen -A export 2>/dev/null\n'
+    probe = (
+        rc_content
+        + '\nprintf "__ENV__\\n"; compgen -A export 2>/dev/null\n'
+        + 'printf "__FUNCS__\\n"; compgen -A function 2>/dev/null\n'
+    )
     try:
         import subprocess
 
@@ -450,17 +527,24 @@ def _baseline_snapshot(rc_content: str) -> frozenset[str]:
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
-        return frozenset()
+        return frozenset(), frozenset()
     env: set[str] = set()
-    in_env = False
+    funcs: set[str] = set()
+    section = ""
     for line in result.stdout.splitlines():
         if line == "__ENV__":
-            in_env = True
+            section = "env"
             continue
-        if in_env:
+        if line == "__FUNCS__":
+            section = "funcs"
+            continue
+        if section == "env":
             env.add(line.strip())
+        elif section == "funcs":
+            funcs.add(line.strip())
     env.discard("")
-    return frozenset(env)
+    funcs.discard("")
+    return frozenset(env), frozenset(funcs)
 
 
 def resolve_or_create_session(
@@ -482,13 +566,14 @@ def resolve_or_create_session(
     data_dir = Path(ctx.data_dir) if ctx.data_dir else Path.home() / ".lisa"
     priming = SessionPriming(data_dir=data_dir, session_key=key)
     rc_content = priming.render()
-    env = _baseline_snapshot(rc_content.path.read_text(encoding="utf-8"))
+    env, funcs = _baseline_snapshot(rc_content.path.read_text(encoding="utf-8"))
     session = BashSession(
         session_key=key,
         data_dir=data_dir,
         priming=priming,
         sandboxed=_sandbox_available() if sandboxed is None else sandboxed,
         initial_env=env,
+        initial_funcs=funcs,
         state_policy=_session_state_policy(ctx),
     )
     _SESSIONS[key] = session

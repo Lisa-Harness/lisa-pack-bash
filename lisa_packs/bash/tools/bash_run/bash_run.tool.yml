@@ -1,7 +1,7 @@
 tool_id: bash_run
 pack_id: lisa-pack-bash
 module_path: lisa_packs.bash.tools.bash_run.bash_run
-description: "Run one command, a background job, or a batch of independent commands in a persistent bash session. Cwd and exported env carry across calls; empty success is explicit; rc=1 from grep/diff/test is informational; large output spills to a file path; timeouts background the work instead of killing it (except sleep/git). Prefer `commands` for independent read-only fan-outs. Posture depends on sandboxed/backend/persistence: sandboxed:false = real permanent host changes (confirm before mutating); backend tmpfs = ephemeral scratch (probe freely, produce a patch); backend overlay = mergeable layer via persist/layer_id."
+description: "Run one command, a background job, or a batch of independent commands in a persistent bash session. Cwd and exported env carry across calls (function bodies too when the session policy permits); empty success is explicit; rc=1 from grep/diff/test is informational; large output spills to a file path; timeouts background the work instead of killing it, bare and sandboxed alike (except sleep/git). Prefer `commands` for independent read-only fan-outs. Posture depends on sandboxed/backend/persistence: sandboxed:false = real permanent host changes (confirm before mutating); backend tmpfs = ephemeral scratch (probe freely, produce a patch); backend overlay = mergeable layer via persist/layer_id."
 effect: execute
 approval_required: true
 approval_preview: "run shell command(s)"

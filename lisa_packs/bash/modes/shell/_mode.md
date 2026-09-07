@@ -30,8 +30,9 @@ policy error and suggest the user change the policy rather than retrying.
 Do not re-implement these. Trust the result JSON.
 
 - **Cwd and exported env carry across calls** in this session. `cd` once; later
-  commands see it. `export` once; later commands see it. Function bodies are
-  not restored (deferred).
+  commands see it. `export` once; later commands see it. Function bodies defined
+  in one call replay in the next when the session policy permits it
+  (`session_state.functions`); otherwise they are call-local.
 - **Empty success is explicit.** A silent `rc=0` comes back as a
   `shaping_note` saying the command produced no output — that is success, not
   a hung tool. Do not retry.
@@ -44,10 +45,11 @@ Do not re-implement these. Trust the result JSON.
 - **Large output spills to a file.** `truncated: true` plus `stdout_path` /
   `stderr_path` means the full stream is on disk. Inspect the file (`head`,
   `tail`, `grep`) instead of re-running the command.
-- **Timeouts background work instead of killing it**, except commands that
-  start with `sleep` or contain `git` (those still time out and die). The
-  result is `backgrounded: true` with `job_id`, `log_path`, `rc_path`. Poll
-  those files; do not invent a second tool.
+- **Timeouts background work instead of killing it** (foreground bare and
+  sandboxed alike), except commands that start with `sleep` or contain `git`
+  (those still time out and die). The result is `backgrounded: true` with
+  `job_id`, `log_path`, `rc_path`. Poll those files; do not invent a second
+  tool.
 - **Independent commands can run as a batch** via `commands` (cap 8). Overlay
   capture always serializes. Batch children share a snapshot of session
   state; env deltas are discarded, and cwd is adopted only if every child
@@ -96,7 +98,9 @@ write to the host.
 - Set `run_in_background: true` for long builds, tests, or servers. The call
   returns immediately with `job_id` / `log_path` / `rc_path` / `status_path`.
 - A foreground command that hits `timeout_seconds` is auto-backgrounded the
-  same way (except `sleep` / `git`).
+  same way (except `sleep` / `git`), bare and sandboxed alike. Sandbox jobs
+  keep the namespace alive until the command finishes; overlay capture
+  completes normally.
 - There is no listing or output tool. Every later `bash_run` result includes
   `background_jobs` for still-running work. When a job finishes, `rc_path`
   holds the integer exit code and `status_path` flips to `done` or `killed`.

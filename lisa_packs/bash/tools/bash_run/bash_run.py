@@ -56,8 +56,8 @@ class Parameters(BaseModel):
             "servers - the model continues while they run and reads the job's "
             "log/status files later. A timed-out foreground command is "
             "auto-backgrounded (instead of killed) unless it starts with `sleep` "
-            "or contains `git`, so work is never silently lost. Not valid with "
-            "`commands`."
+            "or contains `git`, so work is never silently lost - bare and "
+            "sandboxed alike. Not valid with `commands`."
         ),
     )
     persist: bool = Field(
