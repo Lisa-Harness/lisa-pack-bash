@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from kernel.models import ToolExecutionContext
+from kernel.tools.output_stream import publish_tool_output
 
 from lisa_packs.bash.session import BashSession
 
@@ -26,6 +27,7 @@ __all__ = [
     "MAX_BATCH_COMMANDS",
     "MAX_OUTPUT_BYTES",
     "ParsedOutput",
+    "StreamTap",
     "drain_to_file",
     "is_auto_background_guarded",
     "pipe_failure_note",
@@ -33,6 +35,7 @@ __all__ = [
     "run_batch_in_session",
     "run_in_session",
     "shape_empty_output",
+    "tapped_drain_to_file",
 ]
 
 MAX_OUTPUT_BYTES = 512_000
@@ -64,7 +67,7 @@ _BENIGN_RC1_PREFIXES = ("git diff", "git grep")
 class ParsedOutput:
     """Structured parse of one command's raw stdout."""
 
-    __slots__ = ("body", "return_code", "pipe_statuses", "state")
+    __slots__ = ("body", "pipe_statuses", "return_code", "state")
 
     def __init__(
         self,
@@ -83,6 +86,67 @@ class ParsedOutput:
         # Backward-compat: tuple unpack (body, rc) keeps old call sites working.
         yield self.body
         yield self.return_code
+
+
+class StreamTap:
+    """Line-buffered incremental-output forwarder for one subprocess stream.
+
+    Wraps the executor's drain loops: as chunks arrive, complete lines are
+    forwarded to the operator surface via ``publish_tool_output`` (the
+    ``lisa.tool_output`` bus topic) while the trailing partial line is held
+    until the next chunk or stream close. Gated on ``ctx.stream_output`` —
+    tools that don't declare the flag (or run headless with no bus) pay only
+    the line-splitting cost and publish nothing.
+
+    Deliberately NOT a sentinel filter: the sandboxed path composes through
+    ``bwrap_run``, whose output carries the primed prompt + rc marker only at
+    the very end; mid-command sentinel echo is rare and harmless on a display
+    surface (the parse step still strips it from the model-visible result).
+    """
+
+    __slots__ = ("_buffer", "_ctx", "_max_line", "_seq", "_stream")
+
+    def __init__(self, ctx: ToolExecutionContext, *, stream: str) -> None:
+        self._ctx = ctx
+        self._stream = stream
+        self._buffer = ""
+        self._seq = 0
+        # A pathological single line (e.g. base64 dump) is truncated for the
+        # operator view; the full text still reaches the model via ToolResult.
+        self._max_line = 2000
+
+    def feed(self, chunk: bytes) -> None:
+        """Split ``chunk`` into lines and publish each complete one."""
+        if not chunk:
+            return
+        text = chunk.decode("utf-8", errors="replace")
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, _, rest = self._buffer.partition("\n")
+            self._buffer = rest
+            self._publish(line)
+
+    def close(self) -> None:
+        """Flush the trailing partial line (if any) on stream end."""
+        if self._buffer:
+            self._publish(self._buffer)
+            self._buffer = ""
+
+    def _publish(self, line: str) -> None:
+        if len(line) > self._max_line:
+            line = line[: self._max_line - 1] + "…"
+        publish_tool_output(self._ctx, text=line, stream=self._stream, seq=self._seq)
+        self._seq += 1
+
+
+def _maybe_tap(ctx: ToolExecutionContext, *, stream: str) -> StreamTap | None:
+    """Build a :class:`StreamTap` only when streaming is declared and live."""
+    if not getattr(ctx, "stream_output", False):
+        return None
+    bus = getattr(ctx, "event_bus", None)
+    if bus is None or not hasattr(bus, "publish"):
+        return None
+    return StreamTap(ctx, stream=stream)
 
 
 async def drain_to_file(
@@ -111,6 +175,47 @@ async def drain_to_file(
             inline_remaining = inline_limit - len(inline)
             if inline_remaining > 0:
                 inline.extend(chunk[:inline_remaining])
+    if total > inline_limit:
+        overflowed = True
+    return {
+        "inline": inline.decode("utf-8", errors="replace"),
+        "output_path": str(spill_path),
+        "output_bytes": total,
+        "truncated": overflowed or len(inline) >= inline_limit,
+    }
+
+
+async def tapped_drain_to_file(
+    stream: asyncio.StreamReader,
+    spill_path: Path,
+    tap: StreamTap,
+    *,
+    inline_limit: int = MAX_OUTPUT_BYTES,
+    spill_limit: int = MAX_SPILL_BYTES,
+) -> dict[str, Any]:
+    """:func:`drain_to_file` with an incremental :class:`StreamTap` feed.
+
+    Same spill/inline contract as the plain drain (the tap sees every chunk
+    but never alters what lands on disk or in the inline head); the tap just
+    observes the stream so the operator surface can render output while the
+    command runs.
+    """
+    inline = bytearray()
+    overflowed = False
+    total = 0
+    spill_path.parent.mkdir(parents=True, exist_ok=True)
+    with spill_path.open("wb") as handle:
+        while chunk := await stream.read(8192):
+            tap.feed(chunk)
+            total += len(chunk)
+            if total <= spill_limit:
+                handle.write(chunk)
+            else:
+                overflowed = True
+            inline_remaining = inline_limit - len(inline)
+            if inline_remaining > 0:
+                inline.extend(chunk[:inline_remaining])
+    tap.close()
     if total > inline_limit:
         overflowed = True
     return {
@@ -314,6 +419,7 @@ async def _run_process(
     *,
     timeout_seconds: int | None,
     spill_dir: Path | None = None,
+    ctx: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
     process = await asyncio.create_subprocess_exec(
         *argv,
@@ -333,8 +439,20 @@ async def _run_process(
     stamp = secrets.token_hex(4)
     stdout_path = spill_dir / f"stdout-{stamp}.log"
     stderr_path = spill_dir / f"stderr-{stamp}.log"
-    stdout_task = asyncio.create_task(drain_to_file(process.stdout, stdout_path))
-    stderr_task = asyncio.create_task(drain_to_file(process.stderr, stderr_path))
+    stdout_tap = _maybe_tap(ctx, stream="stdout")
+    stderr_tap = _maybe_tap(ctx, stream="stderr")
+    if stdout_tap is not None:
+        stdout_task = asyncio.create_task(
+            tapped_drain_to_file(process.stdout, stdout_path, stdout_tap)
+        )
+    else:
+        stdout_task = asyncio.create_task(drain_to_file(process.stdout, stdout_path))
+    if stderr_tap is not None:
+        stderr_task = asyncio.create_task(
+            tapped_drain_to_file(process.stderr, stderr_path, stderr_tap)
+        )
+    else:
+        stderr_task = asyncio.create_task(drain_to_file(process.stderr, stderr_path))
     timed_out = False
     try:
         if timeout_seconds is None:
@@ -421,6 +539,7 @@ async def _run_via_bwrap(
         session_plan_digest=ctx.session_plan_digest,
         event_bus=ctx.event_bus,
         state_provider=ctx.state_provider,
+        stream_output=ctx.stream_output,
     )
     tool_result = await execute_tool("bwrap_run", child)
     payload = dict(tool_result.output_json or {})
@@ -513,7 +632,10 @@ async def _run_background_command(
             # Explicit background jobs run to completion; the call-level
             # timeout only applies to foreground / auto-background.
             proc = await _run_process(
-                inner_argv, timeout_seconds=None, spill_dir=log_path.parent
+                inner_argv,
+                timeout_seconds=None,
+                spill_dir=log_path.parent,
+                ctx=ctx,
             )
             stdout_raw = proc["stdout_raw"]
             stderr = proc["stderr"]
@@ -586,8 +708,20 @@ async def _run_process_with_auto_background(
     stamp = secrets.token_hex(4)
     stdout_path = spill_dir / f"stdout-{stamp}.log"
     stderr_path = spill_dir / f"stderr-{stamp}.log"
-    stdout_task = asyncio.create_task(drain_to_file(process.stdout, stdout_path))
-    stderr_task = asyncio.create_task(drain_to_file(process.stderr, stderr_path))
+    stdout_tap = _maybe_tap(ctx, stream="stdout")
+    stderr_tap = _maybe_tap(ctx, stream="stderr")
+    if stdout_tap is not None:
+        stdout_task = asyncio.create_task(
+            tapped_drain_to_file(process.stdout, stdout_path, stdout_tap)
+        )
+    else:
+        stdout_task = asyncio.create_task(drain_to_file(process.stdout, stdout_path))
+    if stderr_tap is not None:
+        stderr_task = asyncio.create_task(
+            tapped_drain_to_file(process.stderr, stderr_path, stderr_tap)
+        )
+    else:
+        stderr_task = asyncio.create_task(drain_to_file(process.stderr, stderr_path))
     try:
         await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
     except TimeoutError:
@@ -822,7 +956,7 @@ async def run_in_session(
                     persist=persist,
                     layer_id=layer_id,
                 )
-            if "error" in payload and payload["error"]:
+            if payload.get("error"):
                 # The sandbox itself reported a failure (e.g. bwrap missing on
                 # this host): surface it with the sandbox stamp and any reason
                 # the child provided so the model can relay the fix.
@@ -870,7 +1004,10 @@ async def run_in_session(
             spill_dir.mkdir(parents=True, exist_ok=True)
             if is_auto_background_guarded(command):
                 proc = await _run_process(
-                    inner_argv, timeout_seconds=timeout_seconds, spill_dir=spill_dir
+                    inner_argv,
+                    timeout_seconds=timeout_seconds,
+                    spill_dir=spill_dir,
+                    ctx=ctx,
                 )
             else:
                 proc = await _run_process_with_auto_background(

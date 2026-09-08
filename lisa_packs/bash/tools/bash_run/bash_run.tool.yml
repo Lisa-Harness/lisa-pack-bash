@@ -6,4 +6,5 @@ effect: execute
 approval_required: true
 approval_preview: "run shell command(s)"
 display_template: "{command}"
+stream_output: true
 exportable: true
