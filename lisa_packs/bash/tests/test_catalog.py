@@ -41,5 +41,12 @@ def test_shell_mode_still_routable() -> None:
     assert mode["routable"] is True
     assert mode["command_pattern"].startswith("^(?:/)?shell")
     assert "bash_run" in mode["allowed_tool_ids"]
-    assert "layers_list" in mode["allowed_tool_ids"]
+    # layers_list must NOT be in allowed_tool_ids: it is a cross-pack
+    # read-effect OPERATION (bwrap pack), not an MCP tool. Listing it here
+    # made mode_completion_effects classify it as a required write (the
+    # unresolvable-tool-id default) and the write-contract backstop blocked
+    # every summarize-only shell turn as a hallucinated success
+    # (2026-09-07 turns 114/116/118). It stays reachable via the operation
+    # catalog; the mode body still tells the model to use it in Regime C.
+    assert "layers_list" not in mode["allowed_tool_ids"]
     assert "sandbox_facts" in mode["pre_turn_operation_ids"]

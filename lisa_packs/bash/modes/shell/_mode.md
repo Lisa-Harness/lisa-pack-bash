@@ -10,7 +10,13 @@ routing_intent_tags: [shell, execute, terminal]
 routing_intent_keywords:
   shell: [shell, bash, command, terminal, run, execute, cli]
 satisfies_intents: [shell, execute]
-allowed_tool_ids: [bash_run, layers_list]
+# Tool ids only (MCP tools). Do NOT list in-process operations here: a
+# read-effect operation in this list is misread by the completion contract
+# as a required *write* (unresolvable tool ids default to write), which
+# blocks every summarize-only shell turn as a hallucinated success. The
+# bwrap pack's layers_list op is reachable via the op catalog without an
+# explicit binding (bound by sandbox_facts' shared shell surface).
+allowed_tool_ids: [bash_run]
 pre_turn_operation_ids: [sandbox_facts]
 ---
 
