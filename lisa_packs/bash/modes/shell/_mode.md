@@ -99,6 +99,25 @@ The floor *permits* host execution — chosen, not broken (no `missing`). Behave
 as Regime A with extra care; tighten with `overrides` when you don't need to
 write to the host.
 
+## Ownership inside the sandbox
+
+You run as **mapped root** via a single-entry uid map (the harness stamps the
+mapping in the result's `identity` block). Consequences for `ls -l` / `stat` /
+`find -printf %u:%g` output:
+
+- Files owned by any host uid other than the session user display as
+  **`nobody:nobody`** (overflow uid 65534) — a display artifact of the user
+  namespace, not a permissions change.
+- Your own files display as **`root:root`** inside the sandbox.
+- On-disk ownership is unchanged; overlay-captured files are owned by the real
+  host user outside the sandbox.
+
+**Never `chown`/`chmod` to "repair" owners inside the sandbox.** In regime B
+such writes are discarded; in regime C they pollute the capture layer with
+bogus ownership metadata. Trust on-disk truth, not the owner column: check
+`sandboxed` on the result before treating `nobody:nobody` as meaningful, and
+prefer numeric ids (`ls -n`, `stat -c %u:%g`) when ownership actually matters.
+
 ## Background jobs
 
 - Set `run_in_background: true` for long builds, tests, or servers. The call

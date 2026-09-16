@@ -304,6 +304,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             output_json["capture_root"] = result["capture_root"]
         if result.get("scratch_dir"):
             output_json["scratch_dir"] = result["scratch_dir"]
+        if result.get("identity"):
+            output_json["identity"] = result["identity"]
     if result.get("degraded"):
         output_json["degraded"] = True
         output_json["note"] = result.get("note")

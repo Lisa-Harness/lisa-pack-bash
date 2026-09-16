@@ -985,6 +985,7 @@ async def run_in_session(
                 "persistence": payload.get("persistence"),
                 "capture_root": payload.get("capture_root"),
                 "scratch_dir": payload.get("scratch_dir"),
+                "identity": payload.get("identity"),
             }
             if parsed.pipe_statuses:
                 result["pipe_statuses"] = parsed.pipe_statuses

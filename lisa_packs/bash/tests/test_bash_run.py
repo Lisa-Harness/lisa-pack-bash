@@ -84,6 +84,11 @@ async def test_sandboxed_composition_threaded(monkeypatch, tmp_path: Path) -> No
             "backend": "tmpfs",
             "layer_id": "session-x",
             "persistence": "ephemeral",
+            "identity": {
+                "sandbox_uid": 0,
+                "host_uid": 1000,
+                "note": "overflow-uid display artifact; see sandbox_ownership.md",
+            },
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
@@ -97,6 +102,9 @@ async def test_sandboxed_composition_threaded(monkeypatch, tmp_path: Path) -> No
     assert seen["command"] == "touch /tmp/x"
     assert seen["kwargs"]["overrides"] == {"network": "allow"}
     assert seen["kwargs"]["persist"] is True
+    # The bwrap identity stamp is forwarded to the model surface.
+    assert result.output_json["identity"]["sandbox_uid"] == 0
+    assert "sandbox_ownership.md" in result.output_json["identity"]["note"]
 
 
 @pytest.mark.asyncio
