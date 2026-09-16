@@ -534,6 +534,9 @@ async def _run_via_bwrap(
         },
         data_dir=ctx.data_dir,
         pack_config=ctx.pack_config,
+        pack_configuration_resolver=getattr(
+            ctx, "pack_configuration_resolver", None
+        ),
         approval_service=ctx.approval_service,
         approval_request_id=ctx.approval_request_id,
         session_plan_digest=ctx.session_plan_digest,

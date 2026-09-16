@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field, model_validator
 
 from lisa_packs.bash import read_authored_text
-from lisa_packs.bash.executor import MAX_BATCH_COMMANDS, run_batch_in_session, run_in_session
+from lisa_packs.bash.executor import (
+    MAX_BATCH_COMMANDS,
+    run_batch_in_session,
+    run_in_session,
+)
 from lisa_packs.bash.session import (
     SandboxRequiredButUnavailable,
     _floor_requires_sandbox,
@@ -17,6 +23,27 @@ from lisa_packs.bash.session import (
 )
 
 TOOL_ID = "bash_run"
+
+#: Override axes that count as a tightening request (opting into the sandbox
+#: under a bare floor). A request outside these keys is not an integrity raise.
+_TIGHTENING_OVERRIDE_KEYS = ("persistence", "network", "device", "ipc", "paths")
+
+
+def _wants_sandbox(params: Parameters) -> bool:
+    """True when the model asked for containment above the bare floor.
+
+    A bare floor is a PERMISSION, not a mandate: without an explicit
+    tightening request the shell runs on the host; ``persist``/``layer_id``
+    or any sandbox-axis ``overrides`` entry composes through the sandbox
+    instead. Model parameters are untrusted, so this never WEAKENS the floor
+    - it only chooses between two postures the floor already permits.
+    """
+    if params.persist or params.layer_id:
+        return True
+    overrides = params.overrides
+    return isinstance(overrides, Mapping) and any(
+        key in overrides for key in _TIGHTENING_OVERRIDE_KEYS
+    )
 
 
 class Parameters(BaseModel):
@@ -78,15 +105,18 @@ class Parameters(BaseModel):
     overrides: dict = Field(
         default_factory=dict,
         description=(
-            "Tightening overrides for the sandbox (only when sandboxed), keyed "
-            "by axis: persistence (ephemeral|overlay|readonly), network "
-            "(allow|deny), paths ({path: rw|ro|hidden}). Overrides may only "
-            "raise integrity above the harness floor, never loosen it."
+            "Tightening overrides for the sandbox, keyed by axis: persistence "
+            "(direct-write|overlay|ephemeral|readonly), network (allow|deny), "
+            "device (dev|minimal|none), ipc (shared|unshared), paths "
+            "({path: rw|ro|hidden}). Overrides may only raise integrity above "
+            "the harness floor, never loosen it. Under a bare floor, ANY "
+            "override here (or persist/layer_id) opts this call into the "
+            "sandbox; with no overrides the call runs on the host."
         ),
     )
 
     @model_validator(mode="after")
-    def _exclusive_command_or_commands(self) -> "Parameters":
+    def _exclusive_command_or_commands(self) -> Parameters:
         has_command = bool(self.command)
         has_commands = bool(self.commands)
         if has_command == has_commands:
@@ -99,7 +129,9 @@ class Parameters(BaseModel):
                     f"commands is capped at {MAX_BATCH_COMMANDS} "
                     f"(got {len(self.commands)})"
                 )
-            if any(not isinstance(item, str) or not item.strip() for item in self.commands):
+            if any(
+                not isinstance(item, str) or not item.strip() for item in self.commands
+            ):
                 raise ValueError("every item in `commands` must be a non-empty string")
         if self.when not in ("auto", "parallel", "serial"):
             raise ValueError("`when` must be auto, parallel, or serial")
@@ -152,6 +184,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     elif requires is False and not available:
         # The floor deliberately permits bare execution (e.g. on a host without
         # bwrap): run bare by choice, stamped distinctly from a broken sandbox.
+        sandboxed = False
+        deliberate_bare = True
+    elif requires is False and available and not _wants_sandbox(params):
+        # Floor bare + healthy sandbox + no tightening request: bare is the
+        # harness's chosen posture, not a fallback. The model can still opt
+        # into containment per call via persist/layer_id/overrides.
         sandboxed = False
         deliberate_bare = True
 

@@ -16,6 +16,7 @@ import json
 import logging
 import shlex
 import shutil
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -85,10 +86,10 @@ def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
     """
     policy = dict(_DEFAULT_SESSION_STATE)
     pack_config = getattr(ctx, "pack_config", None)
-    if not isinstance(pack_config, dict):
+    if not isinstance(pack_config, Mapping):
         return policy
     override = pack_config.get("session_state")
-    if not isinstance(override, dict):
+    if not isinstance(override, Mapping):
         return policy
     if override.get("cwd") is False:
         policy["cwd"] = False
@@ -137,8 +138,28 @@ def _sandbox_available() -> bool:
     return "bwrap_run" in get_tool_catalog()
 
 
+def _floor_execution_posture(config: object) -> str | None:
+    """Read the harness floor's ``execution`` axis from a pack config mapping.
+
+    Returns "sandbox" / "bare" when authored, else None. Accepts any Mapping
+    because the kernel freezes session configuration into MappingProxyType.
+    """
+    if not isinstance(config, Mapping):
+        return None
+    sandbox = config.get("sandbox")
+    if not isinstance(sandbox, Mapping):
+        return None
+    floor = sandbox.get("floor")
+    if not isinstance(floor, Mapping):
+        return None
+    execution = floor.get("execution")
+    if execution in ("bare", "sandbox"):
+        return str(execution)
+    return None
+
+
 def _floor_requires_sandbox(ctx: ToolExecutionContext) -> bool | None:
-    """Read the harness floor's execution posture for this pack.
+    """Read the harness floor's execution posture for the shell.
 
     Returns True when the harness floor mandates the sandbox (the model or fate
     may never run bare), False when the floor deliberately permits bare, and
@@ -148,22 +169,28 @@ def _floor_requires_sandbox(ctx: ToolExecutionContext) -> bool | None:
     ``parameters`` cannot forge it. bwrap is intentionally not imported (pack
     isolation forbids cross-pack imports), so the policy is parsed locally with
     no dependency on the bwrap pack.
+
+    The canonical floor is authored under the ``lisa-pack-bwrap`` configuration
+    key (that is where the shipped default session and the lattice live), but
+    the bare-vs-sandbox decision belongs to the shell tool. This pack's own
+    configuration wins; when it authors no floor, the global
+    ``lisa-pack-bwrap`` floor is read through the pack-configuration resolver
+    that the kernel attaches to every execution context.
     """
-    pack_config = getattr(ctx, "pack_config", None)
-    if not isinstance(pack_config, dict):
+    own = _floor_execution_posture(getattr(ctx, "pack_config", None))
+    if own is not None:
+        return own == "sandbox"
+    resolver = getattr(ctx, "pack_configuration_resolver", None)
+    if resolver is None:
         return None
-    sandbox = pack_config.get("sandbox")
-    if not isinstance(sandbox, dict):
+    try:
+        global_config = resolver.for_pack("lisa-pack-bwrap")
+    except Exception:  # noqa: BLE001 - resolver is host-owned and total
         return None
-    floor = sandbox.get("floor")
-    if not isinstance(floor, dict):
+    posture = _floor_execution_posture(global_config)
+    if posture is None:
         return None
-    execution = floor.get("execution")
-    if execution == "sandbox":
-        return True
-    if execution == "bare":
-        return False
-    return None
+    return posture == "sandbox"
 
 
 class SandboxRequiredButUnavailable(RuntimeError):  # noqa: N818 - not a tool error
@@ -426,9 +453,9 @@ class BashSession:
             # a single var via `rc,pipe1 pipe2...` and split on the first comma.
             # Leading \\n keeps the marker parseable when output lacks a final newline.
             "__lisa_rcpipe=$?,$(printf '%s ' \"${PIPESTATUS[@]}\") ; "
-            '__lisa_rc=${__lisa_rcpipe%%,*}; '
-            '__lisa_pipe=${__lisa_rcpipe#*,}; '
-            f"printf '\\n{marker}%s pipe=%s\\n' \"$__lisa_rc\" \"$__lisa_pipe\"; "
+            "__lisa_rc=${__lisa_rcpipe%%,*}; "
+            "__lisa_pipe=${__lisa_rcpipe#*,}; "
+            f'printf \'\\n{marker}%s pipe=%s\\n\' "$__lisa_rc" "$__lisa_pipe"; '
             # A separate state line powers session-wide carryover: cwd plus
             # each new export on its own line (so values containing spaces
             # cannot break the parser). Function bodies are emitted as base64
@@ -437,15 +464,15 @@ class BashSession:
             # replays them via the state file. The host delta-filters against
             # the rc baseline, so rc-managed exports (LANG, TERM…) are never
             # replayed.
-            f'printf \'%s\\n\' "{state_marker}cwd=$(printf \'%q\' "$PWD")"; '
-            'if command -v base64 >/dev/null 2>&1; then '
-            'compgen -A function 2>/dev/null | while IFS= read -r __lisa_fn; do '
+            f"printf '%s\\n' \"{state_marker}cwd=$(printf '%q' \"$PWD\")\"; "
+            "if command -v base64 >/dev/null 2>&1; then "
+            "compgen -A function 2>/dev/null | while IFS= read -r __lisa_fn; do "
             '[ -n "$__lisa_fn" ] || continue; '
             f'printf \'%sfunc %s %s\\n\' "{self.sentinel.strip()}" "$__lisa_fn" '
             '"$(declare -f "$__lisa_fn" | base64 | tr -d \'\\n\')"; '
-            'done; fi; '
-            'compgen -A export 2>/dev/null | while IFS= read -r n; '
-            f'do v="${{!n}}"; printf \'%svar %s=%q\\n\' '
+            "done; fi; "
+            "compgen -A export 2>/dev/null | while IFS= read -r n; "
+            f"do v=\"${{!n}}\"; printf '%svar %s=%q\\n' "
             f'"{self.sentinel.strip()}" "$n" "$v"; done; '
             'exit "$__lisa_rc"'
         )
@@ -457,36 +484,48 @@ class BashSession:
         ]
 
 
-def _containment_current() -> tuple[str, list[str]]:
+def _containment_current(
+    ctx: ToolExecutionContext | None = None,
+) -> tuple[str, list[str]]:
     """Compute the live containment state from current environment probes.
 
     - ``contained``        - registered and runnable (commands compose via bwrap).
     - ``degraded``         - registered but cannot run (binary missing, userns
       disabled). Reasons explain the gap to the operator.
-    - ``deliberate_bare``  - the harness floor permits bare and the sandbox is
-      unavailable; a CHOSEN posture, distinct from an unexpected gap.
+    - ``deliberate_bare``  - the harness floor permits bare and no tightening
+      request is in force: commands run on the host BY CHOICE, distinct from
+      an unexpected gap. The approval engine treats this as not-contained
+      (fail closed) so bare execution still prompts.
     - ``none``             - no sandbox registered at all; commands run on the host.
     """
     if _sandbox_available():
         reasons = _sandbox_degraded()
         if reasons:
             return "degraded", reasons
+        if ctx is not None and _floor_requires_sandbox(ctx) is False:
+            return "deliberate_bare", []
         return "contained", []
     return "none", ["sandbox pack not installed"]
 
 
-def _write_containment_fact(session: BashSession) -> None:
+def _write_containment_fact(
+    session: BashSession, ctx: ToolExecutionContext | None = None
+) -> None:
     """Publish this session's containment fact for the host approval engine.
 
     Writes ``<data_dir>/sandbox-facts/<session_key>.json`` atomically so the
     policy engine can read it at approval time WITHOUT importing pack code —
-    the pack reports the fact, the host owns the decision. The host recomputes
-    the session key from the approval identity (same four inputs), so the file
-    is the only coupling between pack and host on this axis. Never raises: a
-    failure to publish must not block a shell session (the engine fails closed
-    to a prompt when the fact is absent or unreadable).
+    the pack reports the fact; the host owns the approve/ask/deny decision. The
+    host recomputes the session key from the approval identity (same four
+    inputs), so the file is the only coupling between pack and host on this
+    axis. Never raises: a failure to publish must not block a shell session
+    (the engine fails closed to a prompt when the fact is absent or unreadable).
+
+    ``ctx`` carries the harness floor: a bare floor flips the reported state to
+    ``deliberate_bare`` so the engine never auto-approves host execution off a
+    stale ``contained`` fact.
     """
-    state, reasons = _containment_current()
+    state, reasons = _containment_current(ctx)
     payload = {
         "tool_id": "bash_run",
         "containment": state,
@@ -555,12 +594,17 @@ def resolve_or_create_session(
     """Return (creating if needed) the session for this ctx identity.
 
     ``sandboxed`` may be forced by tests; when None it is detected from the
-    tool catalog.
+    tool catalog. When explicitly passed on a cached session, the posture is
+    updated in place: the per-call decision (bare floor without tightening vs.
+    a tightened sandboxed run) must not be pinned to whichever posture happened
+    to create the session.
     """
     key = _session_key(ctx)
     session = _SESSIONS.get(key)
     if session is not None:
-        _write_containment_fact(session)
+        if sandboxed is not None:
+            session.sandboxed = sandboxed
+        _write_containment_fact(session, ctx)
         return session
 
     data_dir = Path(ctx.data_dir) if ctx.data_dir else Path.home() / ".lisa"
@@ -577,7 +621,7 @@ def resolve_or_create_session(
         state_policy=_session_state_policy(ctx),
     )
     _SESSIONS[key] = session
-    _write_containment_fact(session)
+    _write_containment_fact(session, ctx)
     return session
 
 
