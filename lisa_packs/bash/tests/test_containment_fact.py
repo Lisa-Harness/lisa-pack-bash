@@ -4,7 +4,7 @@ The bash pack reports its per-session sandbox containment state as a neutral
 fact file for the host approval engine. These tests cover the three states
 (contained / degraded / none) against ``resolve_or_create_session`` and the
 entry operation's pre-warm path, asserting the file lands at
-``<data_dir>/sandbox-facts/<session_key>.json`` and fails closed correctly.
+``<data_dir>/run/<session_key>/sandbox-facts.json`` and fails closed correctly.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def _fresh_sessions():
 
 
 def _read_fact(tmp_path: Path, session) -> dict:
-    path = tmp_path / SANDBOX_FACTS_DIRNAME / f"{session.session_key}.json"
+    path = tmp_path / "run" / session.session_key / SANDBOX_FACTS_DIRNAME
     assert path.is_file(), f"containment fact not written at {path}"
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -137,7 +137,7 @@ def test_session_key_matches_engine_recompute(tmp_path: Path) -> None:
     # The engine recomputes sha256("ws/u/d/surf")[:16] from the approval identity.
     expected = hashlib.sha256(b"ws/u/d/surf").hexdigest()[:16]
     assert session.session_key == expected
-    assert (tmp_path / SANDBOX_FACTS_DIRNAME / f"{expected}.json").is_file()
+    assert (tmp_path / "run" / expected / SANDBOX_FACTS_DIRNAME).is_file()
 
 
 def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
@@ -156,4 +156,5 @@ def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
     assert result.output_json["containment"] == "contained"
     assert result.output_json["sandboxed"] is True
     # The fact file landed even though bash_run was never invoked.
-    assert list((tmp_path / SANDBOX_FACTS_DIRNAME).glob("*.json"))
+    expected = hashlib.sha256(b"ws/u/d/surf").hexdigest()[:16]
+    assert list((tmp_path / "run" / expected).glob(SANDBOX_FACTS_DIRNAME))

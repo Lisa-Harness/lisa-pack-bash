@@ -3,7 +3,7 @@
 Runs before every shell-mode model call (bound via the mode's
 ``pre_turn_operation_ids``). It resolves — creating if needed — the bash session
 for this context identity, which both primes the session and publishes the
-per-session sandbox containment fact to ``<data_dir>/sandbox-facts/<key>.json``.
+per-session sandbox containment fact to ``<data_dir>/run/<session_key>/sandbox-facts.json``.
 
 That pre-warm matters: without it, the first ``bash_run`` call would hit the
 approval gate *before* any session existed, so the policy engine's
@@ -56,7 +56,7 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         pack_configuration_resolver=ctx.pack_configuration_resolver,
     )
     session = resolve_or_create_session(tool_ctx)
-    fact_path = session.data_dir / SANDBOX_FACTS_DIRNAME / f"{session.session_key}.json"
+    fact_path = session.data_dir / "run" / session.session_key / SANDBOX_FACTS_DIRNAME
     try:
         fact = json.loads(fact_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

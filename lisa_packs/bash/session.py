@@ -44,7 +44,12 @@ _DEFAULT_BWRAP_TIMEOUT = 120
 #: Subdirectory of the host data dir where the pack publishes its per-session
 #: sandbox *containment fact* for the host approval engine. The pack reports
 #: the fact; the host owns the approve/ask/deny decision (pack never decides).
-SANDBOX_FACTS_DIRNAME = "sandbox-facts"
+SANDBOX_FACTS_DIRNAME = "sandbox-facts.json"
+
+#: Per-session execution state lives under ``<data_dir>/run/<session_key>/``
+#: (the sdk.layout RUN category) — one gc-able tree per session holding job
+#: artifacts, scratch, profile files, session logs, and the containment fact.
+_RUN_DIR_NAME = "run"
 
 
 def bash_available() -> bool:
@@ -260,7 +265,7 @@ class BashSession:
     @property
     def jobs_dir(self) -> Path:
         """Directory for job artifacts and spill files (host-visible)."""
-        return self.data_dir / "jobs" / self.session_key
+        return self.data_dir / _RUN_DIR_NAME / self.session_key / "jobs"
 
     def _select_functions(self, functions: dict[str, str]) -> dict[str, str]:
         """Apply the functions policy (off / allowlist / blocklist + patterns)."""
@@ -532,7 +537,7 @@ def _write_containment_fact(
         "reasons": reasons,
         "probed_at": datetime.now(UTC).isoformat(),
     }
-    path = session.data_dir / SANDBOX_FACTS_DIRNAME / f"{session.session_key}.json"
+    path = session.data_dir / _RUN_DIR_NAME / session.session_key / SANDBOX_FACTS_DIRNAME
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")

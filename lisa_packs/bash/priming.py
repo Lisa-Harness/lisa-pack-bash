@@ -62,9 +62,10 @@ class SessionPriming:
         self.data_dir = data_dir
         self.session_key = session_key
         self.sentinel = new_sentinel()
-        self.log_path = data_dir / "logs" / f"bash-{session_key}.log"
-        self.rc_path = data_dir / "profile" / f"rc-{session_key}"
-        self.state_path = data_dir / "profile" / f"state-{session_key}.sh"
+        run_dir = data_dir / "run" / session_key
+        self.log_path = run_dir / f"bash-{session_key}.log"
+        self.rc_path = run_dir / "profile" / f"rc-{session_key}"
+        self.state_path = run_dir / "profile" / f"state-{session_key}.sh"
 
     def render(self) -> RenderedRc:
         """Write the rendered rc to disk and return its handle."""
