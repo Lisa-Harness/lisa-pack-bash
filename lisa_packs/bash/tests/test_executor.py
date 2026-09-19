@@ -156,6 +156,29 @@ def test_resolve_batch_schedule_overlay_downgrades_parallel() -> None:
     assert "overlay" in reason
 
 
+def test_resolve_batch_schedule_capture_paths_downgrade_parallel() -> None:
+    """Capture-path overrides are per-call overlay capture: serial always."""
+    schedule, reason = executor.resolve_batch_schedule(
+        "parallel",
+        sandboxed=True,
+        overrides={"paths": {"/etc": "capture"}},
+    )
+    assert schedule == "serial"
+    assert reason is not None
+    assert "overlay" in reason
+
+
+def test_resolve_batch_schedule_plain_rw_paths_stay_parallel() -> None:
+    """Non-capture path overrides do not force overlay serialization."""
+    schedule, reason = executor.resolve_batch_schedule(
+        "auto",
+        sandboxed=False,
+        overrides={"paths": {"/tmp/x": "rw"}},
+    )
+    assert schedule == "parallel"
+    assert reason is None
+
+
 def test_resolve_batch_schedule_layer_id_is_overlay() -> None:
     schedule, reason = executor.resolve_batch_schedule(
         "auto", sandboxed=True, layer_id="layer-1"
@@ -170,3 +193,31 @@ def test_resolve_batch_schedule_explicit_serial() -> None:
     )
     assert schedule == "serial"
     assert reason is None
+
+
+def test_floor_posture_payload_extracts_axes() -> None:
+    """The containment fact's posture payload mirrors the authored floor."""
+    from lisa_packs.bash.session import _floor_posture_payload
+
+    payload = _floor_posture_payload(
+        {
+            "sandbox": {
+                "floor": {
+                    "execution": "sandbox",
+                    "persistence": "overlay",
+                    "paths": {"/etc": "capture", "/var/log": "ro"},
+                }
+            }
+        }
+    )
+    assert payload["execution"] == "sandbox"
+    assert payload["persistence"] == "overlay"
+    assert payload["capture_paths"] == ["/etc"]
+
+    # Unset floor -> empty payload (never guessed).
+    assert _floor_posture_payload({}) == {}
+    assert _floor_posture_payload(None) == {}
+    # Aliased persistence ('direct') is NOT the bwrap token set: excluded.
+    assert "persistence" not in _floor_posture_payload(
+        {"sandbox": {"floor": {"persistence": "direct"}}}
+    )

@@ -42,6 +42,7 @@ Two things shape every call:
 | `sandboxed: false`, `mode: "bare"` | The real host **by deliberate choice** — the policy floor permits it (there is no `missing`) | Permanent and real |
 | `backend: "tmpfs"`, `persistence: "ephemeral"` | An isolated sandbox | Discarded when the run ends, except inside `scratch_dir` |
 | `backend: "overlay"` | An isolated sandbox that records changes | Staged into a mergeable layer at `capture_root` — a proposal, not an applied fix |
+| `backend: "overlay"` + `captured_paths` | An isolated sandbox recording changes on extra pinned paths too | Staged into the same layer per captured path — reviewed and applied via the bwrap pack's export/apply ops |
 
 Trust the stamp over your assumptions, and re-check it when `mode`, `backend`,
 or `persistence` differ between calls.
@@ -75,20 +76,23 @@ Isolated; writes vanish when the run exits.
 
 ### Overlay capture (`backend: "overlay"`)
 
-Opt in per call with `persist: true` or `layer_id`. Writes are recorded into
-a layer, not applied to live files.
+Opt in per call with `persist: true` or `layer_id` (or a `capture` path
+override). Writes are recorded into a layer, not applied to live files.
 
 - Tell the user the change is staged and give them the `layer_id`; it is
-  reviewed and merged host-side via the bwrap pack's `layers_list` operation.
+  reviewed (diffs via the bwrap pack's `layers_export`) and merged host-side
+  via `layers_apply` — the user invokes the apply, never you.
+- `captured_paths` on the result lists extra pinned paths (beyond the
+  workspace) whose writes are staged into the same layer.
 - `persistence: "session"` drops the layer at session end;
   `persistence: "persistent"` (from `persist: true`) keeps it.
 
 ### Containment is set by the user, not by you
 
 `overrides` may only **raise** integrity (axes: `persistence`, `network`,
-`device`, `ipc`, `paths`). A request to loosen below the harness floor is
-rejected with a policy error: relay it and suggest the user change the policy
-— do not reword or retry it.
+`device`, `ipc`, `paths` with `rw`/`capture`/`ro`/`hidden`). A request to
+loosen below the harness floor is rejected with a policy error: relay it and
+suggest the user change the policy — do not reword or retry it.
 
 ## §3 Trust the result JSON — the harness already does this
 

@@ -301,7 +301,12 @@ def resolve_batch_schedule(
     """
     overrides = overrides or {}
     persistence = overrides.get("persistence")
-    overlay = bool(persist) or bool(layer_id) or persistence == "overlay"
+    paths_overlay = any(
+        isinstance(overrides.get("paths"), dict)
+        and access == "capture"
+        for access in (overrides.get("paths") or {}).values()
+    )
+    overlay = bool(persist) or bool(layer_id) or persistence == "overlay" or paths_overlay
     if requested not in ("auto", "parallel", "serial"):
         requested = "auto"
     if overlay and requested != "serial":

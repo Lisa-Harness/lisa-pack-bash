@@ -513,6 +513,45 @@ def _containment_current(
     return "none", ["sandbox pack not installed"]
 
 
+def _floor_posture_payload(config: object) -> dict[str, Any]:
+    """Extract the floor's execution/persistence axes for the containment fact.
+
+    Mirrors :func:`_floor_execution_posture`'s trusted-channel reading
+    (Mapping-tolerant for the kernel's frozen config). Returns a partial dict
+    with only the axes the harness authored; empty dict when the floor is
+    unset. The bwrap pack's persistence axis (`direct-write`/`overlay`/
+    `ephemeral`/`readonly`) is surfaced verbatim so the approval engine can
+    distinguish captured-mutation sessions from direct-write ones.
+    """
+    if not isinstance(config, Mapping):
+        return {}
+    sandbox = config.get("sandbox")
+    if not isinstance(sandbox, Mapping):
+        return {}
+    floor = sandbox.get("floor")
+    if not isinstance(floor, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    execution = floor.get("execution")
+    if execution in ("bare", "sandbox"):
+        out["execution"] = str(execution)
+    persistence = floor.get("persistence")
+    if isinstance(persistence, str) and persistence in (
+        "direct-write", "overlay", "ephemeral", "readonly",
+    ):
+        out["persistence"] = persistence
+    paths = floor.get("paths")
+    if isinstance(paths, Mapping):
+        captured = sorted(
+            str(path)
+            for path, access in paths.items()
+            if access == "capture"
+        )
+        if captured:
+            out["capture_paths"] = captured
+    return out
+
+
 def _write_containment_fact(
     session: BashSession, ctx: ToolExecutionContext | None = None
 ) -> None:
@@ -537,6 +576,17 @@ def _write_containment_fact(
         "reasons": reasons,
         "probed_at": datetime.now(UTC).isoformat(),
     }
+    # Additive posture fields (hosts ignore unknown keys): the harness floor's
+    # authored execution/persistence axes, so the approval engine can tailor
+    # prompts - e.g. reserve prompting for the merge step when the floor pins
+    # overlay persistence (nothing lands on the live filesystem). Absent
+    # axes stay absent, never guessed.
+    try:
+        posture = _floor_posture_payload(getattr(ctx, "pack_config", None))
+        if posture:
+            payload["floor_posture"] = posture
+    except Exception:  # noqa: BLE001 - the fact must never fail to publish
+        pass
     path = session.data_dir / _RUN_DIR_NAME / session.session_key / SANDBOX_FACTS_DIRNAME
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

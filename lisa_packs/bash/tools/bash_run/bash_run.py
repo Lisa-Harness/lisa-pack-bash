@@ -108,10 +108,12 @@ class Parameters(BaseModel):
             "Tightening overrides for the sandbox, keyed by axis: persistence "
             "(direct-write|overlay|ephemeral|readonly), network (allow|deny), "
             "device (dev|minimal|none), ipc (shared|unshared), paths "
-            "({path: rw|ro|hidden}). Overrides may only raise integrity above "
-            "the harness floor, never loosen it. Under a bare floor, ANY "
-            "override here (or persist/layer_id) opts this call into the "
-            "sandbox; with no overrides the call runs on the host."
+            "({path: rw|capture|ro|hidden}). `capture` stages writes for that "
+            "path into the overlay layer; it requires the overlay posture. "
+            "Overrides may only raise integrity above the harness floor, "
+            "never loosen it. Under a bare floor, ANY override here (or "
+            "persist/layer_id) opts this call into the sandbox; with no "
+            "overrides the call runs on the host."
         ),
     )
 
