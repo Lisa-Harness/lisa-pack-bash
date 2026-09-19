@@ -43,7 +43,7 @@ has to guess. The four regimes:
 | `sandboxed: false` (no `mode`) | **Unsandboxed.** bwrap pack not installed / sandbox degraded. Changes are permanent and real. | Prefer read-only first; explain+confirm mutating commands. |
 | `sandboxed: false`, `mode: "bare"` | **Deliberate bare.** The harness floor *permits* host execution by choice, not breakage (no `missing`). | Same care as unsandboxed; tighten with `overrides` when no host write is needed. |
 | `backend: "tmpfs"`, `persistence: "ephemeral"` | **Ephemeral sandbox.** Workspace bound read-only at its real path; writes go to a per-session host-visible `scratch_dir` and are discarded. | Probe freely; produce a unified diff/script under `scratch_dir` for the user. |
-| `backend: "overlay"` | **Captured sandbox.** Opt-in (`persist` or `layer_id`); writes land in an overlayfs layer at `capture_root` — a proposal, not an applied fix. | Report `layer_id`; review with the bwrap pack's `layers_list` op. |
+| `backend: "overlay"` | **Captured sandbox.** Opt-in (`persist`, `layer_id`, or a `capture` path override); writes land in an overlayfs layer at `capture_root` (and per `captured_paths` target) — a proposal, not an applied fix. | Report `layer_id` + `captured_paths`; review with the bwrap pack's `layers_export` op; the user applies via `layers_apply`. |
 
 `persistence: "session"` drops the layer at session end;
 `persistence: "persistent"` (with `persist: true`) retains it. Sandbox
