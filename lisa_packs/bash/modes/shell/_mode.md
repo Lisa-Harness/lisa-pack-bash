@@ -79,9 +79,11 @@ Isolated; writes vanish when the run exits.
 Opt in per call with `persist: true` or `layer_id` (or a `capture` path
 override). Writes are recorded into a layer, not applied to live files.
 
-- Tell the user the change is staged and give them the `layer_id`; it is
-  reviewed (diffs via the bwrap pack's `layers_export`) and merged host-side
-  via `layers_apply` — the user invokes the apply, never you.
+- **The staged-change contract lives in `layer_review.md`** — relay the
+  `layer_id`, never claim a staged change is merged or "done", and never
+  invoke the apply yourself.
+- Review happens via the bwrap pack's `layers_export` (unified diffs);
+  merge happens via `layers_apply`, invoked by the user.
 - `captured_paths` on the result lists extra pinned paths (beyond the
   workspace) whose writes are staged into the same layer.
 - `persistence: "session"` drops the layer at session end;

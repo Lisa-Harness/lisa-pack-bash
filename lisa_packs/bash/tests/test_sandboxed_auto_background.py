@@ -36,6 +36,49 @@ def _fresh_sessions():
 
 
 @pytest.mark.asyncio
+async def test_sandboxed_staged_layer_result_carries_review_note(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A composed overlay run is stamped STAGED + the layer_review.md pointer."""
+    monkeypatch.setattr(bash_run, "bash_available", lambda: True)
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
+
+    async def _staged_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id):
+        return {
+            "return_code": 0,
+            "stdout_raw": "done\n",
+            "stderr": "",
+            "timed_out": False,
+            "truncated": False,
+            "sandboxed": True,
+            "backend": "overlay",
+            "persistence": "overlay",
+            "layer_id": "L-staged",
+        }
+
+    monkeypatch.setattr(executor, "_run_via_bwrap", _staged_bwrap)
+    monkeypatch.setattr(executor, "is_auto_background_guarded", lambda cmd: True)
+    ctx = _ctx(tmp_path, command="echo staged", persist=True)
+    session = executor.resolve_or_create_session_for_tests(sandboxed=True) if hasattr(
+        executor, "resolve_or_create_session_for_tests"
+    ) else None
+    # Use the session the tool itself would create: compose via run_in_session.
+    from lisa_packs.bash.session import resolve_or_create_session
+
+    session = resolve_or_create_session(ctx, sandboxed=True)
+    result = await executor.run_in_session(
+        ctx, session, "echo staged", timeout_seconds=10, persist=True,
+    )
+    assert result.get("error") is None
+    assert result["backend"] == "overlay"
+    assert result["layer_id"] == "L-staged"
+    assert "STAGED" in result["note"]
+    assert "layer_review.md" in result["note"]
+    # Non-degraded overlay runs only: the ephemeral default carries no note.
+    assert "degraded" not in result
+
+
+@pytest.mark.asyncio
 async def test_sandboxed_slow_command_auto_backgrounds(
     monkeypatch, tmp_path: Path
 ) -> None:

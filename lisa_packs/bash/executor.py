@@ -1003,6 +1003,13 @@ async def run_in_session(
             if payload.get("degraded"):
                 result["degraded"] = True
                 result["note"] = payload.get("note")
+            if payload.get("layer_id") and not payload.get("degraded"):
+                # Staged capture: point the model at the review contract doc.
+                result["note"] = (
+                    "Writes are STAGED into capture layer "
+                    f"'{payload['layer_id']}', not applied to the live "
+                    "filesystem. See layer_review.md."
+                )
             # Guarded sandboxed commands (sleep / git) keep the plain T+30s
             # bwrap timeout: bounded work is killed, never backgrounded.
         else:
