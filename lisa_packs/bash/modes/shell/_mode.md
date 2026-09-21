@@ -4,6 +4,11 @@ mode_provider_id: lisa-pack-bash
 mode_kind: action
 routable: true
 priority: 5
+fast_path_patterns:
+  - "\\bshell\\b"
+  - "\\bbash\\b"
+  - "\\bcommand line\\b"
+  - "\\bterminal\\b"
 command_pattern: "^(?:/)?shell(?:[\\s,:;]+(?P<query>.+))?$"
 description: "Shell execution for command-line tasks via a persistent bash session."
 routing_intent_tags: [shell, execute, terminal]
