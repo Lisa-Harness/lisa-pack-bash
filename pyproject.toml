@@ -21,7 +21,7 @@ name = "lisa-pack-bash"
 version = "0.1.0"
 description = "Shell execution capability for Lisa - persistent, agent-optimized bash session"
 requires-python = ">=3.11"
-dependencies = ["lisa-kernel", "lisa-sdk"]
+dependencies = ["lisa-harness-kernel", "lisa-harness-sdk"]
 
 [project.optional-dependencies]
 dev = [

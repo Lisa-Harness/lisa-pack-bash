@@ -29,7 +29,7 @@ configuration, and the result JSON rather than by a spread of tools.
 pip install -e ./bash
 ```
 
-Requires Python ≥ 3.11 plus `lisa-kernel` and `lisa-sdk`. `bash` must be on
+Requires Python ≥ 3.11 plus `lisa-harness-kernel` and `lisa-harness-sdk`. `bash` must be on
 `PATH` (a hard dependency: there is no shell without it — a missing bash is a
 hard error carrying `missing: ["bash"]` and an install doc).
 
