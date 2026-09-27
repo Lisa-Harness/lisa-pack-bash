@@ -11,10 +11,11 @@ fast_path_patterns:
   - "\\bterminal\\b"
 command_pattern: "^(?:/)?shell(?:[\\s,:;]+(?P<query>.+))?$"
 description: "Shell execution for command-line tasks via a persistent bash session."
-routing_intent_tags: [shell, execute, terminal]
+routing_intent_tags: [shell, terminal]
 routing_intent_keywords:
-  shell: [shell, bash, command, terminal, run, execute, cli]
-satisfies_intents: [shell, execute]
+  shell: [shell, bash, command]
+  terminal: [terminal, cli]
+satisfies_intents: [shell, terminal]
 # Tool ids only (MCP tools). Do NOT list in-process operations here: a
 # read-effect operation in this list is misread by the completion contract
 # as a required *write* (unresolvable tool ids default to write), which
