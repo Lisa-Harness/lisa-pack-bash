@@ -49,11 +49,8 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         query=ctx.query,
         session_plan_digest=ctx.session_plan_digest,
         data_dir=ctx.data_dir,
-        # The harness floor (authored under the bwrap pack's configuration key)
-        # decides the shell's posture; the resolver lets the session layer read
-        # that global floor even though this op belongs to the bash pack.
         pack_config=ctx.pack_config,
-        pack_configuration_resolver=ctx.pack_configuration_resolver,
+        execution_floor_for=ctx.execution_floor_for,
     )
     session = resolve_or_create_session(tool_ctx)
     fact_path = session.data_dir / "run" / session.session_key / SANDBOX_FACTS_DIRNAME

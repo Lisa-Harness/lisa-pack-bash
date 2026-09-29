@@ -4,7 +4,31 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+from kernel.models import ToolExecutionContext, ToolResult
+
 from lisa_packs.bash import executor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sandboxed": False, "return_code": 0},
+        {"sandboxed": True, "degraded": True, "return_code": 0},
+        {"sandboxed": True},
+    ],
+)
+async def test_bwrap_dispatch_rejects_unverified_result(payload: dict[str, object]) -> None:
+    async def dispatch(_tool_id: str, _parameters: object) -> ToolResult:
+        return ToolResult(output_text="unverified", output_json=payload)
+
+    ctx = ToolExecutionContext(delegated_tool_dispatch=dispatch)
+    result = await executor._run_via_bwrap(
+        ctx, ["true"], timeout_seconds=5, overrides={}, persist=False, layer_id=""
+    )
+    assert result.get("error")
+    assert result.get("sandboxed") is False
 
 
 def test_parse_output_strips_sentinel_and_rc() -> None:
@@ -197,27 +221,24 @@ def test_resolve_batch_schedule_explicit_serial() -> None:
 
 def test_floor_posture_payload_extracts_axes() -> None:
     """The containment fact's posture payload mirrors the authored floor."""
+    from kernel.capability_binding import ExecutionFloorView
+
     from lisa_packs.bash.session import _floor_posture_payload
 
     payload = _floor_posture_payload(
-        {
-            "sandbox": {
-                "floor": {
-                    "execution": "sandbox",
-                    "persistence": "overlay",
-                    "paths": {"/etc": "capture", "/var/log": "ro"},
-                }
-            }
-        }
+        ExecutionFloorView(
+            execution="sandbox",
+            persistence="overlay",
+            paths={"/etc": "capture", "/var/log": "ro"},
+        )
     )
     assert payload["execution"] == "sandbox"
     assert payload["persistence"] == "overlay"
     assert payload["capture_paths"] == ["/etc"]
 
     # Unset floor -> empty payload (never guessed).
-    assert _floor_posture_payload({}) == {}
     assert _floor_posture_payload(None) == {}
     # Aliased persistence ('direct') is NOT the bwrap token set: excluded.
     assert "persistence" not in _floor_posture_payload(
-        {"sandbox": {"floor": {"persistence": "direct"}}}
+        ExecutionFloorView(persistence="direct")
     )

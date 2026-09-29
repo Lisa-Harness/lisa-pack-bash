@@ -511,45 +511,20 @@ async def _run_via_bwrap(
     persist: bool,
     layer_id: str,
 ) -> dict[str, Any]:
-    """Compose the command through the bwrap_run tool via a child ctx.
-
-    Network/device/path containment is decided by the harness floor inside
-    bwrap_run (read from ``pack_config``); bash forwards the model's tightening
-    ``overrides`` and the floor does the rest - the model can only raise
-    integrity, never loosen it.
-    """
-    from kernel.tools.registry import execute_tool
-
-    child = ToolExecutionContext(
-        tool_id="bwrap_run",
-        workspace_id=ctx.workspace_id,
-        user_id=ctx.user_id,
-        user_slug=ctx.user_slug,
-        surface_type=ctx.surface_type,
-        surface_id=ctx.surface_id,
-        memory_scope=ctx.memory_scope,
-        mode_id=ctx.mode_id,
-        query=ctx.query,
-        parameters={
+    """Compose through bwrap_run bound to its own pack configuration."""
+    dispatch = ctx.delegated_tool_dispatch
+    if dispatch is None:
+        return {"error": "bwrap sandbox dispatch is unavailable", "sandboxed": False}
+    tool_result = await dispatch(
+        "bwrap_run",
+        {
             "argv": inner_argv,
             "overrides": overrides,
             "timeout_seconds": timeout_seconds,
             "persist": persist,
             "layer_id": layer_id,
         },
-        data_dir=ctx.data_dir,
-        pack_config=ctx.pack_config,
-        pack_configuration_resolver=getattr(
-            ctx, "pack_configuration_resolver", None
-        ),
-        approval_service=ctx.approval_service,
-        approval_request_id=ctx.approval_request_id,
-        session_plan_digest=ctx.session_plan_digest,
-        event_bus=ctx.event_bus,
-        state_provider=ctx.state_provider,
-        stream_output=ctx.stream_output,
     )
-    tool_result = await execute_tool("bwrap_run", child)
     payload = dict(tool_result.output_json or {})
     if tool_result.error:
         return {
@@ -562,6 +537,12 @@ async def _run_via_bwrap(
             "persistence": payload.get("persistence"),
             "degraded": payload.get("degraded", False),
         }
+    if (
+        payload.get("sandboxed") is not True
+        or payload.get("degraded")
+        or type(payload.get("return_code")) is not int
+    ):
+        return {"error": "bwrap sandbox returned an unverified result", "sandboxed": False}
     payload["stdout_raw"] = tool_result.output_text or ""
     return payload
 

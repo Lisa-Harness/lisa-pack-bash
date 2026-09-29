@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash import executor as _executor
@@ -19,7 +20,10 @@ from lisa_packs.bash.tools.bash_run import bash_run
 
 
 def _ctx(
-    tmp_path: Path, command: str = "echo hi", pack_config: dict | None = None
+    tmp_path: Path,
+    command: str = "echo hi",
+    pack_config: dict | None = None,
+    floor_execution: str | None = "sandbox",
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
         tool_id="bash_run",
@@ -30,6 +34,11 @@ def _ctx(
         parameters={"command": command},
         data_dir=str(tmp_path),
         pack_config=pack_config or {},
+        execution_floor_for=(
+            (lambda _tool_id: ExecutionFloorView(execution=floor_execution))
+            if floor_execution is not None
+            else None
+        ),
     )
 
 
@@ -97,7 +106,9 @@ async def test_floor_permits_bare_runs_deliberately_bare(
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    result = await bash_run.execute(_ctx(tmp_path, pack_config=_floor("bare")))
+    result = await bash_run.execute(
+        _ctx(tmp_path, pack_config=_floor("bare"), floor_execution="bare")
+    )
     assert result.error == ""
     assert result.output_json["sandboxed"] is False
     assert result.output_json["mode"] == "bare"
@@ -131,7 +142,9 @@ async def test_floor_bare_with_healthy_sandbox_runs_bare(
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    result = await bash_run.execute(_ctx(tmp_path, pack_config=_floor("bare")))
+    result = await bash_run.execute(
+        _ctx(tmp_path, pack_config=_floor("bare"), floor_execution="bare")
+    )
     assert result.error == ""
     assert result.output_json["sandboxed"] is False
     assert result.output_json["mode"] == "bare"
@@ -159,7 +172,7 @@ async def test_floor_bare_persist_opts_into_sandbox(
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    ctx = _ctx(tmp_path, pack_config=_floor("bare"))
+    ctx = _ctx(tmp_path, pack_config=_floor("bare"), floor_execution="bare")
     ctx.parameters = {"command": "echo hi", "persist": True}
     result = await bash_run.execute(ctx)
     assert result.error == ""
@@ -187,7 +200,7 @@ async def test_floor_bare_override_opts_into_sandbox(
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    ctx = _ctx(tmp_path, pack_config=_floor("bare"))
+    ctx = _ctx(tmp_path, pack_config=_floor("bare"), floor_execution="bare")
     ctx.parameters = {
         "command": "echo hi",
         "overrides": {"network": "deny"},
@@ -201,19 +214,7 @@ async def test_floor_bare_override_opts_into_sandbox(
 async def test_floor_bare_read_via_global_bwrap_config(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """No own floor but a bwrap-keyed global floor → bash honors it.
-
-    The canonical floor is authored under ``lisa-pack-bwrap`` in
-    ``resources.packs.configuration``; the bash pack reads it through the
-    pack-configuration resolver the kernel attaches to every context.
-    """
-
-    class _Resolver:
-        def __init__(self, config):
-            self._config = config
-
-        def for_pack(self, pack_id):
-            return self._config if pack_id == "lisa-pack-bwrap" else {}
+    """Bwrap's projected bare floor permits host execution without bash policy."""
 
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
@@ -231,8 +232,7 @@ async def test_floor_bare_read_via_global_bwrap_config(
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    ctx = _ctx(tmp_path, pack_config={})
-    ctx.pack_configuration_resolver = _Resolver(_floor("bare"))
+    ctx = _ctx(tmp_path, pack_config={}, floor_execution="bare")
     result = await bash_run.execute(ctx)
     assert result.error == ""
     assert result.output_json["sandboxed"] is False
@@ -243,28 +243,19 @@ async def test_floor_bare_read_via_global_bwrap_config(
 async def test_floor_bare_global_sandbox_floor_still_mandates_sandbox(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """A bwrap-keyed execution=sandbox floor still fails loudly when bwrap is absent."""
-
-    class _Resolver:
-        def for_pack(self, pack_id):
-            return _floor("sandbox") if pack_id == "lisa-pack-bwrap" else {}
+    """A bwrap-owned sandbox floor still fails loudly when bwrap is absent."""
 
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = _ctx(tmp_path, pack_config={})
-    ctx.pack_configuration_resolver = _Resolver()
     result = await bash_run.execute(ctx)
     assert result.error
     assert "requires contained execution" in result.error
 
 
 @pytest.mark.asyncio
-async def test_own_floor_beats_global_bwrap_floor(monkeypatch, tmp_path: Path) -> None:
-    """A bash-keyed floor overrides the bwrap-keyed global floor."""
-
-    class _Resolver:
-        def for_pack(self, pack_id):
-            return _floor("bare") if pack_id == "lisa-pack-bwrap" else {}
+async def test_bash_floor_cannot_loosen_bwrap_owner_floor(monkeypatch, tmp_path: Path) -> None:
+    """A bash-keyed bare floor cannot override the bwrap owner's sandbox floor."""
 
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
@@ -280,36 +271,20 @@ async def test_own_floor_beats_global_bwrap_floor(monkeypatch, tmp_path: Path) -
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    # Own config mandates sandbox while the global floor permits bare: sandbox wins.
-    ctx = _ctx(tmp_path, pack_config=_floor("sandbox"))
-    ctx.pack_configuration_resolver = _Resolver()
+    ctx = _ctx(tmp_path, pack_config=_floor("bare"), floor_execution="sandbox")
     result = await bash_run.execute(ctx)
     assert result.error
     assert "requires contained execution" in result.error
 
 
 @pytest.mark.asyncio
-async def test_no_floor_preserves_availability_behavior(
+async def test_no_floor_fails_closed_when_sandbox_absent(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """No floor configured → availability decides, as before (no regression)."""
+    """Missing bwrap policy is not permission to run on the host."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
 
-    async def _fake_run_in_session(ctx, session, command, **kwargs):
-        return {
-            "stdout": "hi",
-            "stderr": "",
-            "return_code": 0,
-            "timed_out": False,
-            "truncated": False,
-            "sandboxed": False,
-        }
-
-    monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    result = await bash_run.execute(_ctx(tmp_path, pack_config={}))
-    assert result.error == ""
+    result = await bash_run.execute(_ctx(tmp_path, pack_config={}, floor_execution=None))
+    assert "requires contained execution" in result.error
     assert result.output_json["sandboxed"] is False
-    # Unset floor + absent pack is NOT deliberate bare: it's the old 'none'.
-    assert "mode" not in result.output_json
-    assert "not installed" in result.output_json["note"]

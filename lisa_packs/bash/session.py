@@ -1,10 +1,8 @@
 """Persistent bash session management for Lisa.
 
 Bash is a hard dependency: there is no shell without it, so a missing bash is
-a hard error (see ``content/prompts/bash_missing.md``). When the bwrap pack is
-available, each command is composed through the sandbox via a child
-ToolExecutionContext (tool-to-tool passthrough); otherwise commands run on the
-host and every result is stamped ``sandboxed: false`` (visible, not silent).
+a hard error (see ``content/prompts/bash_missing.md``). The bwrap owner's
+execution floor decides the posture; a missing floor never authorizes host execution.
 """
 
 from __future__ import annotations
@@ -21,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash.priming import SessionPriming
@@ -143,59 +142,19 @@ def _sandbox_available() -> bool:
     return "bwrap_run" in get_tool_catalog()
 
 
-def _floor_execution_posture(config: object) -> str | None:
-    """Read the harness floor's ``execution`` axis from a pack config mapping.
-
-    Returns "sandbox" / "bare" when authored, else None. Accepts any Mapping
-    because the kernel freezes session configuration into MappingProxyType.
-    """
-    if not isinstance(config, Mapping):
-        return None
-    sandbox = config.get("sandbox")
-    if not isinstance(sandbox, Mapping):
-        return None
-    floor = sandbox.get("floor")
-    if not isinstance(floor, Mapping):
-        return None
-    execution = floor.get("execution")
-    if execution in ("bare", "sandbox"):
-        return str(execution)
-    return None
+def _bwrap_floor(ctx: ToolExecutionContext) -> ExecutionFloorView | None:
+    floor_for = ctx.execution_floor_for
+    return floor_for("bwrap_run") if floor_for is not None else None
 
 
-def _floor_requires_sandbox(ctx: ToolExecutionContext) -> bool | None:
+def _floor_requires_sandbox(ctx: ToolExecutionContext) -> bool:
     """Read the harness floor's execution posture for the shell.
 
-    Returns True when the harness floor mandates the sandbox (the model or fate
-    may never run bare), False when the floor deliberately permits bare, and
-    None when the floor is unset/unreadable (fall back to availability). The
-    floor is trusted session configuration - the lisa kernel populates
-    ``pack_config`` from ``resources.packs.configuration`` and model
-    ``parameters`` cannot forge it. bwrap is intentionally not imported (pack
-    isolation forbids cross-pack imports), so the policy is parsed locally with
-    no dependency on the bwrap pack.
-
-    The canonical floor is authored under the ``lisa-pack-bwrap`` configuration
-    key (that is where the shipped default session and the lattice live), but
-    the bare-vs-sandbox decision belongs to the shell tool. This pack's own
-    configuration wins; when it authors no floor, the global
-    ``lisa-pack-bwrap`` floor is read through the pack-configuration resolver
-    that the kernel attaches to every execution context.
+    Only an explicit bare floor from the bwrap owner permits host execution.
+    A missing floor is not evidence of consent to run bare.
     """
-    own = _floor_execution_posture(getattr(ctx, "pack_config", None))
-    if own is not None:
-        return own == "sandbox"
-    resolver = getattr(ctx, "pack_configuration_resolver", None)
-    if resolver is None:
-        return None
-    try:
-        global_config = resolver.for_pack("lisa-pack-bwrap")
-    except Exception:  # noqa: BLE001 - resolver is host-owned and total
-        return None
-    posture = _floor_execution_posture(global_config)
-    if posture is None:
-        return None
-    return posture == "sandbox"
+    floor = _bwrap_floor(ctx)
+    return floor is None or floor.execution != "bare"
 
 
 class SandboxRequiredButUnavailable(RuntimeError):  # noqa: N818 - not a tool error
@@ -503,52 +462,34 @@ def _containment_current(
       (fail closed) so bare execution still prompts.
     - ``none``             - no sandbox registered at all; commands run on the host.
     """
+    if ctx is not None and _floor_requires_sandbox(ctx) is False:
+        return "deliberate_bare", []
     if _sandbox_available():
         reasons = _sandbox_degraded()
         if reasons:
             return "degraded", reasons
-        if ctx is not None and _floor_requires_sandbox(ctx) is False:
-            return "deliberate_bare", []
         return "contained", []
     return "none", ["sandbox pack not installed"]
 
 
-def _floor_posture_payload(config: object) -> dict[str, Any]:
+def _floor_posture_payload(floor: ExecutionFloorView | None) -> dict[str, Any]:
     """Extract the floor's execution/persistence axes for the containment fact.
 
-    Mirrors :func:`_floor_execution_posture`'s trusted-channel reading
-    (Mapping-tolerant for the kernel's frozen config). Returns a partial dict
-    with only the axes the harness authored; empty dict when the floor is
-    unset. The bwrap pack's persistence axis (`direct-write`/`overlay`/
-    `ephemeral`/`readonly`) is surfaced verbatim so the approval engine can
-    distinguish captured-mutation sessions from direct-write ones.
+    Only owner-projected execution axes are surfaced to the approval engine.
     """
-    if not isinstance(config, Mapping):
-        return {}
-    sandbox = config.get("sandbox")
-    if not isinstance(sandbox, Mapping):
-        return {}
-    floor = sandbox.get("floor")
-    if not isinstance(floor, Mapping):
+    if floor is None:
         return {}
     out: dict[str, Any] = {}
-    execution = floor.get("execution")
-    if execution in ("bare", "sandbox"):
-        out["execution"] = str(execution)
-    persistence = floor.get("persistence")
+    if floor.execution in ("bare", "sandbox"):
+        out["execution"] = floor.execution
+    persistence = floor.persistence
     if isinstance(persistence, str) and persistence in (
         "direct-write", "overlay", "ephemeral", "readonly",
     ):
         out["persistence"] = persistence
-    paths = floor.get("paths")
-    if isinstance(paths, Mapping):
-        captured = sorted(
-            str(path)
-            for path, access in paths.items()
-            if access == "capture"
-        )
-        if captured:
-            out["capture_paths"] = captured
+    captured = sorted(str(path) for path, access in floor.paths.items() if access == "capture")
+    if captured:
+        out["capture_paths"] = captured
     return out
 
 
@@ -582,7 +523,7 @@ def _write_containment_fact(
     # overlay persistence (nothing lands on the live filesystem). Absent
     # axes stay absent, never guessed.
     try:
-        posture = _floor_posture_payload(getattr(ctx, "pack_config", None))
+        posture = _floor_posture_payload(_bwrap_floor(ctx)) if ctx is not None else {}
         if posture:
             payload["floor_posture"] = posture
     except Exception:  # noqa: BLE001 - the fact must never fail to publish

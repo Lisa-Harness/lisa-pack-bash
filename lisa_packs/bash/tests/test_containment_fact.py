@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import pytest
+from kernel.capability_binding import ExecutionFloorView
 from kernel.models import OperationExecutionContext, ToolExecutionContext
 
 from lisa_packs.bash import session as _session
@@ -95,6 +96,7 @@ def test_deliberate_bare_published_when_floor_permits_bare(
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(_session, "_sandbox_degraded", list)
     ctx = _ctx(tmp_path, pack_config={"sandbox": {"floor": {"execution": "bare"}}})
+    ctx.execution_floor_for = lambda _tool_id: ExecutionFloorView(execution="bare")
     session = resolve_or_create_session(ctx, sandboxed=False)
     fact = _read_fact(tmp_path, session)
     assert fact["containment"] == "deliberate_bare"
@@ -109,6 +111,7 @@ def test_fact_flip_to_deliberate_bare_on_reuse(monkeypatch, tmp_path: Path) -> N
     session = resolve_or_create_session(no_floor, sandboxed=True)
     assert _read_fact(tmp_path, session)["containment"] == "contained"
     bare = _ctx(tmp_path, pack_config={"sandbox": {"floor": {"execution": "bare"}}})
+    bare.execution_floor_for = lambda _tool_id: ExecutionFloorView(execution="bare")
     again = resolve_or_create_session(bare)  # cached session reuse path
     fact = _read_fact(tmp_path, again)
     assert fact["containment"] == "deliberate_bare"
@@ -158,3 +161,25 @@ def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
     # The fact file landed even though bash_run was never invoked.
     expected = hashlib.sha256(b"ws/u/d/surf").hexdigest()[:16]
     assert list((tmp_path / "run" / expected).glob(SANDBOX_FACTS_DIRNAME))
+
+
+def test_pre_turn_uses_bwrap_owner_floor(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
+    monkeypatch.setattr(_session, "_sandbox_degraded", list)
+    op_ctx = OperationExecutionContext(
+        workspace_id="ws",
+        user_slug="u",
+        surface_id="surf",
+        session_plan_digest="d",
+        data_dir=str(tmp_path),
+        pack_config={"sandbox": {"floor": {"execution": "bare"}}},
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(
+            execution="sandbox", persistence="overlay"
+        ),
+    )
+    result = asyncio.run(prewarm_op.execute(op_ctx))
+    fact = json.loads(
+        (tmp_path / "run" / result.output_json["session_key"] / SANDBOX_FACTS_DIRNAME).read_text()
+    )
+    assert fact["containment"] == "contained"
+    assert fact["floor_posture"] == {"execution": "sandbox", "persistence": "overlay"}
