@@ -10,13 +10,13 @@ entry operation's pre-warm path, asserting the file lands at
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from kernel.capability_binding import ExecutionFloorView
 from kernel.models import OperationExecutionContext, ToolExecutionContext
+from sdk.identity import execution_scope_key
 
 from lisa_packs.bash import session as _session
 from lisa_packs.bash.operations.sandbox_facts import sandbox_facts as prewarm_op
@@ -137,10 +137,19 @@ def test_session_key_matches_engine_recompute(tmp_path: Path) -> None:
     """The fact path must align with the host engine's recomputed identity key."""
     ctx = _ctx(tmp_path)
     session = resolve_or_create_session(ctx, sandboxed=False)
-    # The engine recomputes sha256("ws/u/d/surf")[:16] from the approval identity.
-    expected = hashlib.sha256(b"ws/u/d/surf").hexdigest()[:16]
+    # The engine recomputes the key from the approval identity via the same
+    # SDK definition, so assert against that rather than a frozen literal.
+    expected = execution_scope_key(ctx)
     assert session.session_key == expected
     assert (tmp_path / "run" / expected / SANDBOX_FACTS_DIRNAME).is_file()
+
+
+def test_session_key_survives_session_plan_edits(tmp_path: Path) -> None:
+    """Editing session context must not orphan a live session's containment fact."""
+    before = resolve_or_create_session(_ctx(tmp_path), sandboxed=False).session_key
+    edited = _ctx(tmp_path)
+    edited.session_plan_digest = "a-different-session-plan"
+    assert execution_scope_key(edited) == before
 
 
 def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
@@ -159,7 +168,7 @@ def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
     assert result.output_json["containment"] == "contained"
     assert result.output_json["sandboxed"] is True
     # The fact file landed even though bash_run was never invoked.
-    expected = hashlib.sha256(b"ws/u/d/surf").hexdigest()[:16]
+    expected = execution_scope_key(op_ctx)
     assert list((tmp_path / "run" / expected).glob(SANDBOX_FACTS_DIRNAME))
 
 

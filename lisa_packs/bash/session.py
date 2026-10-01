@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
-import hashlib
 import json
 import logging
 import shlex
@@ -21,6 +20,7 @@ from typing import Any
 
 from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolExecutionContext
+from sdk.identity import execution_scope_key
 
 from lisa_packs.bash.priming import SessionPriming
 
@@ -115,20 +115,7 @@ class SessionResult(dict):
 
 
 def _session_key(ctx: ToolExecutionContext) -> str:
-    raw = (
-        "/".join(
-            part
-            for part in (
-                ctx.workspace_id,
-                ctx.user_slug,
-                ctx.session_plan_digest,
-                ctx.surface_id,
-            )
-            if part
-        )
-        or "default"
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return execution_scope_key(ctx)
 
 
 def _sandbox_available() -> bool:
