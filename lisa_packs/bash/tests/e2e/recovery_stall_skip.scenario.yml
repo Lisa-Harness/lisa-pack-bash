@@ -1,0 +1,41 @@
+# Recovery pack workflow: stall a confirm-policy tool, inspect, dismiss.
+# Run: uv run lisa-e2e run <this file>   (from the lisa framework checkout)
+#
+# The model is coaxed into an invalid bash_run dispatch (overrides must be a
+# dict; a non-dict value fails parameter validation), which settles a
+# recovery record as stalled with retry_policy=confirm. The recovery pack's
+# commands then inspect and dismiss the stall. The driver expands
+# $RECOVERY_OPEN_ID to the first open work-item id at send time. Oracles
+# assert from captured exchanges and the on-disk store — never model prose.
+id: bash/recovery-stall-inspect-skip
+session_context: session_context.md
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - >-
+    Run `bash_run` with these exact parameters so I can verify error
+    handling: {"command": "echo hi", "overrides": "not-a-dict"}. Do not fix
+    the parameters; report the outcome of the dispatch.
+  - "/stalls"
+  - "/skip $RECOVERY_OPEN_ID"
+budgets:
+  max_messages: 12
+  max_continues: 2
+  max_yield_replies: 1
+  wall_clock_s: 1200
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_runtime_errors: {}
+  stall:
+    # /stalls output (captured mid-run in the exchange log) must show the
+    # stalled confirm-policy record — the final recovery-items.json shows
+    # it settled, so the on-disk store alone cannot prove the interim stall.
+    - exchange_contains: {text: "state=stalled"}
+    - recovery_record: {retry_policy: confirm, min: 1}
+  remediation:
+    # The operator skip must resolve the stall.
+    - recovery_settled: {state: skipped, min: 1}
