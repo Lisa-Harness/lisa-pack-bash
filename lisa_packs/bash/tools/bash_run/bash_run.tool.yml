@@ -8,3 +8,13 @@ approval_preview: "run shell command(s)"
 display_template: "{command}"
 stream_output: true
 exportable: true
+# Kernel wrapper timeout: 0 disables the wrapper (sdk/AUTHORING.md contract).
+# bash_run self-bounds on every path: the model's own timeout_seconds parameter
+# (1-300s) is the visible wait, sandboxed calls get a grace window past it
+# (_AUTO_BG_MAX_TIMEOUT_SECONDS=3600) so a slow command is adopted as a job
+# instead of killed, and streaming output publishes progress on
+# lisa.tool_output the whole time. A wrapper lifetime bound can never be sized
+# to that (the 2026-10-05 shell turn lost a command to a 30s wrapper default
+# cancelling the adoption mid-flight), so the tool declares itself
+# self-bounding instead of picking a magic number.
+timeout_seconds: 0

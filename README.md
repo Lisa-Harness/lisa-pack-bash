@@ -82,7 +82,7 @@ Exactly one of `command` / `commands` is required.
 | `command` | string | — | The shell command to run. Mutually exclusive with `commands`. |
 | `commands` | list[string] | — | Independent commands run as one batch, capped at 8. Best for independent read-only fan-outs; not valid with `run_in_background`. |
 | `when` | `"auto" \| "parallel" \| "serial"` | `"auto"` | Batch schedule. `auto` parallelizes in bare/ephemeral/readonly, serializes under overlay. Overlay capture **always** serializes, even if `parallel` is requested. |
-| `timeout_seconds` | int | `30` | 1–300. A foreground timeout auto-backgrounds the work (see below) instead of killing it. |
+| `timeout_seconds` | int | `30` | 1–300. This is the model's *visible wait*, not a kill switch: a foreground timeout auto-backgrounds the work (see below). The kernel wrapper is disabled for this tool (`timeout_seconds: 0` in `bash_run.tool.yml`) — bash_run self-bounds on every path. |
 | `run_in_background` | bool | `false` | Return a `job_id` immediately for long builds/tests/servers. Not valid with `commands`. |
 | `persist` | bool | `false` | Only when sandboxed: keep the captured overlay layer past the session. |
 | `layer_id` | string | `""` | Only when sandboxed: opt in to overlay capture with an explicit layer id. |
@@ -177,6 +177,18 @@ as a `results` list plus aggregate `return_code`, with `batch: true`,
 - Poll `rc_path` (integer exit code when done) and `status_path`
   (`done`/`killed`). Every later `bash_run` result includes `background_jobs`
   for still-running work. There is no separate listing/output tool.
+- **Wrapper contract.** Everything above only holds because the tool
+  declares `timeout_seconds: 0` — the kernel wrapper (a per-tool
+  `asyncio.wait_for` that defaults to **30 s** when a `.tool.yml` omits the
+  value) is disabled for `bash_run`. bash_run self-bounds on every path:
+  the model's `timeout_seconds` parameter is the visible wait, the sandbox
+  gets a grace window past it (auto-background adoption, up to 3600 s), and
+  `stream_output: true` publishes incremental output on `lisa.tool_output`
+  so the operator sees progress the whole time. The 2026-10-05 shell turn
+  lost a command exactly because the inherited 30 s wrapper default
+  cancelled the adoption mid-flight — no lifetime bound can be sized to
+  work that backgrounds itself. The declaration is pinned by
+  `tests/test_catalog.py`.
 - Job artifacts live at `<data_dir>/jobs/<session_key>/<id>.{log,rc,status.json}`.
   Jobs do **not** survive host-process restart.
 

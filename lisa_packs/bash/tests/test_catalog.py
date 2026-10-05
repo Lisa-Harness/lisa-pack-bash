@@ -50,3 +50,40 @@ def test_shell_mode_still_routable() -> None:
     # catalog; the mode body still tells the model to use it in Regime C.
     assert "layers_list" not in mode["allowed_tool_ids"]
     assert "sandbox_facts" in mode["pre_turn_operation_ids"]
+
+
+def _declared_timeout_ceiling(tool_id: str) -> int:
+    """Read the kernel wrapper timeout declared for ``tool_id``."""
+    catalog = json.loads(
+        build_tool_catalog_json(resolve_tool_roots([get_content_root()]))
+    )
+    return int(catalog[tool_id]["timeout_seconds"])
+
+
+def test_bash_run_declares_itself_self_bounding() -> None:
+    """``bash_run`` must disable the kernel wrapper (``timeout_seconds: 0``).
+
+    Regression (2026-10-05 shell turn): with no declared value the wrapper
+    inherited the 30s default and cancelled the call before the pack could
+    adopt a slow sandboxed command as a job — the command was stranded and
+    the turn aborted. bash_run self-bounds on every path (the model's own
+    ``timeout_seconds`` parameter, the sandbox grace window, job adoption),
+    and its ceiling is published to the operator via ``stream_output``, so a
+    wrapper lifetime bound can never be sized correctly; the tool must
+    declare itself self-bounding instead.
+    """
+    assert _declared_timeout_ceiling("bash_run") == 0, (
+        "bash_run must declare timeout_seconds: 0 (self-bounding); a "
+        "positive wrapper bound will eventually cancel a slow sandboxed "
+        "call before job adoption can run"
+    )
+    # The self-bounding declaration only holds while the tool publishes
+    # observable progress while it runs: that is what replaces the wrapper.
+    declared_streaming = json.loads(
+        build_tool_catalog_json(resolve_tool_roots([get_content_root()]))
+    )["bash_run"]["stream_output"]
+    assert declared_streaming is True, (
+        "bash_run must keep stream_output: true alongside "
+        "timeout_seconds: 0 — the operator-visible progress is what makes "
+        "the self-bounding declaration safe"
+    )
