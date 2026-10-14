@@ -43,7 +43,7 @@ async def test_sandboxed_staged_layer_result_carries_review_note(
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    async def _staged_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id):
+    async def _staged_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
         return {
             "return_code": 0,
             "stdout_raw": "done\n",
@@ -88,7 +88,7 @@ async def test_sandboxed_slow_command_auto_backgrounds(
 
     release = asyncio.Event()
 
-    async def _slow_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id):
+    async def _slow_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
         await asyncio.wait_for(release.wait(), timeout=30)
         return {
             "return_code": 0,
@@ -137,7 +137,7 @@ async def test_sandboxed_git_command_is_killed_not_backgrounded(
 
     seen: dict = {}
 
-    async def _bounded_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id):
+    async def _bounded_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
         seen["timeout_seconds"] = timeout_seconds
         # Child reports a bwrap-level timeout kill, as the real tool does at T+30.
         return {"return_code": -1, "stdout_raw": "", "stderr": "", "timed_out": True}
@@ -160,7 +160,7 @@ async def test_sandboxed_fast_command_not_backgrounded(
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    async def _fast_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id):
+    async def _fast_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
         return {"return_code": 0, "stdout_raw": "quick\n", "stderr": "", "timed_out": False}
 
     monkeypatch.setattr(executor, "_run_via_bwrap", _fast_bwrap)
@@ -177,7 +177,7 @@ async def test_sandboxed_auto_bg_adopts_error_payload(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    async def _err_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id):
+    async def _err_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
         await asyncio.sleep(2)
         return {"error": "boom", "stdout_raw": "", "stderr": "", "timed_out": False}
 

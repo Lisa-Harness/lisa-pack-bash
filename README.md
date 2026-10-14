@@ -198,7 +198,13 @@ as a `results` list plus aggregate `return_code`, with `batch: true`,
 executor's `StreamTap` forwards complete lines to the operator surface on the
 `lisa.tool_output` bus topic (pathological single lines are truncated for the
 view; the full text still reaches the model). Publishing is best-effort and
-never breaks the call.
+never breaks the call. The tap is sentinel-aware: the wrapper's post-command
+state block (`rc=` marker, `state=cwd=`, one `var NAME=` line per exported env
+var) is harness bookkeeping and is filtered out of the operator stream — it
+never floods the display, while the parser still reads the full raw output
+for the model-visible result. The composed sandboxed path (bash_run →
+bwrap_run) applies the same filter via a wrapping event bus around the
+child's publishes.
 
 ## Pack configuration
 

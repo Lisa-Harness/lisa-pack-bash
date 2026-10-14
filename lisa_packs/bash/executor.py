@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from kernel.models import ToolExecutionContext
-from kernel.tools.output_stream import publish_tool_output
+from kernel.tools.output_stream import TOOL_OUTPUT_TOPIC, publish_tool_output
 
 from lisa_packs.bash.session import BashSession
 
@@ -98,15 +98,26 @@ class StreamTap:
     tools that don't declare the flag (or run headless with no bus) pay only
     the line-splitting cost and publish nothing.
 
-    Deliberately NOT a sentinel filter: the sandboxed path composes through
-    ``bwrap_run``, whose output carries the primed prompt + rc marker only at
-    the very end; mid-command sentinel echo is rare and harmless on a display
-    surface (the parse step still strips it from the model-visible result).
+    Deliberately NOT a full sentinel filter: the sentinel prompt echo is
+    rare mid-command and harmless on a display surface. The ONE machinery
+    class that must never reach the operator is the post-command state
+    block the wrapper prints after the model's command (``rc=`` marker,
+    ``state=cwd=``, one ``var NAME=`` line per exported env var — easily
+    150+ lines per call on a host with a rich environment). That block is
+    harness bookkeeping, not command output, so the tap filters those
+    marker lines out of the operator stream here (the parse step still
+    reads the full raw output for the model).
     """
 
-    __slots__ = ("_buffer", "_ctx", "_max_line", "_seq", "_stream")
+    __slots__ = ("_buffer", "_ctx", "_max_line", "_sentinel", "_seq", "_stream")
 
-    def __init__(self, ctx: ToolExecutionContext, *, stream: str) -> None:
+    def __init__(
+        self,
+        ctx: ToolExecutionContext,
+        *,
+        stream: str,
+        sentinel: str = "",
+    ) -> None:
         self._ctx = ctx
         self._stream = stream
         self._buffer = ""
@@ -114,6 +125,26 @@ class StreamTap:
         # A pathological single line (e.g. base64 dump) is truncated for the
         # operator view; the full text still reaches the model via ToolResult.
         self._max_line = 2000
+        self._sentinel = (sentinel or "").strip()
+
+    def _is_machinery(self, line: str) -> bool:
+        """True when ``line`` is one of the wrapper's post-command markers.
+
+        Mirrors the parse contract in :func:`_parse_output` (rc / state=cwd /
+        var NAME= / func NAME <b64> / funcs …) plus the bare sentinel prompt
+        echo. Display-only: the markers stay in the raw stream the parser
+        consumes for the model-visible result.
+        """
+        if not self._sentinel:
+            return False
+        stripped = line.strip()
+        if stripped == self._sentinel:
+            return True
+        if not stripped.startswith(self._sentinel):
+            return False
+        return stripped[len(self._sentinel) :].startswith(
+            ("rc=", "state=", "var ", "func ", "funcs ")
+        )
 
     def feed(self, chunk: bytes) -> None:
         """Split ``chunk`` into lines and publish each complete one."""
@@ -133,20 +164,27 @@ class StreamTap:
             self._buffer = ""
 
     def _publish(self, line: str) -> None:
+        if self._is_machinery(line):
+            return
         if len(line) > self._max_line:
             line = line[: self._max_line - 1] + "…"
         publish_tool_output(self._ctx, text=line, stream=self._stream, seq=self._seq)
         self._seq += 1
 
 
-def _maybe_tap(ctx: ToolExecutionContext, *, stream: str) -> StreamTap | None:
+def _maybe_tap(
+    ctx: ToolExecutionContext,
+    *,
+    stream: str,
+    sentinel: str = "",
+) -> StreamTap | None:
     """Build a :class:`StreamTap` only when streaming is declared and live."""
     if not getattr(ctx, "stream_output", False):
         return None
     bus = getattr(ctx, "event_bus", None)
     if bus is None or not hasattr(bus, "publish"):
         return None
-    return StreamTap(ctx, stream=stream)
+    return StreamTap(ctx, stream=stream, sentinel=sentinel)
 
 
 async def drain_to_file(
@@ -425,6 +463,7 @@ async def _run_process(
     timeout_seconds: int | None,
     spill_dir: Path | None = None,
     ctx: ToolExecutionContext | None = None,
+    sentinel: str = "",
 ) -> dict[str, Any]:
     process = await asyncio.create_subprocess_exec(
         *argv,
@@ -444,8 +483,8 @@ async def _run_process(
     stamp = secrets.token_hex(4)
     stdout_path = spill_dir / f"stdout-{stamp}.log"
     stderr_path = spill_dir / f"stderr-{stamp}.log"
-    stdout_tap = _maybe_tap(ctx, stream="stdout")
-    stderr_tap = _maybe_tap(ctx, stream="stderr")
+    stdout_tap = _maybe_tap(ctx, stream="stdout", sentinel=sentinel)
+    stderr_tap = _maybe_tap(ctx, stream="stderr", sentinel=sentinel)
     if stdout_tap is not None:
         stdout_task = asyncio.create_task(
             tapped_drain_to_file(process.stdout, stdout_path, stdout_tap)
@@ -502,6 +541,54 @@ def _apply_shaping(result: dict[str, Any], command: str) -> None:
         result["note"] = f"{result['note']} {pipe_note}" if result.get("note") else pipe_note
 
 
+class _MachineryFilterBus:
+    """Event-bus wrapper dropping the session's sentinel machinery lines.
+
+    Wraps the turn's event bus for the duration of a composed sandboxed call
+    (bash_run → bwrap_run): the child tool publishes its incremental output
+    on this bus, but the post-command state block the bash wrapper prints
+    (``rc=`` marker, ``state=cwd=``, one ``var NAME=`` line per exported env
+    var — easily 150+ lines per call) is harness bookkeeping, not command
+    output. Machinery payloads on the ``lisa.tool_output`` topic are dropped
+    here; every other topic, subscription, and real output line forwards to
+    the wrapped bus unchanged. Display-only: the raw markers stay in the
+    stream the parser consumes for the model-visible result.
+    """
+
+    __slots__ = ("_bus", "_sentinel")
+
+    def __init__(self, bus: Any, *, sentinel: str) -> None:
+        self._bus = bus
+        self._sentinel = (sentinel or "").strip()
+
+    def _is_machinery(self, text: str) -> bool:
+        """True when ``text`` is one of the wrapper's post-command markers."""
+        if not self._sentinel:
+            return False
+        stripped = text.strip()
+        if stripped == self._sentinel:
+            return True
+        if not stripped.startswith(self._sentinel):
+            return False
+        return stripped[len(self._sentinel) :].startswith(
+            ("rc=", "state=", "var ", "func ", "funcs ")
+        )
+
+    async def publish(self, topic: str, payload: dict[str, Any]) -> None:
+        if topic == TOOL_OUTPUT_TOPIC and self._is_machinery(
+            str(payload.get("text") or "")
+        ):
+            return
+        await self._bus.publish(topic, payload)
+
+    def __getattr__(self, name: str) -> Any:
+        # ``_bus`` is set first in __init__; guard the one slot that must
+        # never recurse through the delegation below.
+        if name == "_bus":
+            raise AttributeError(name)
+        return getattr(self._bus, name)
+
+
 async def _run_via_bwrap(
     ctx: ToolExecutionContext,
     inner_argv: list[str],
@@ -510,21 +597,47 @@ async def _run_via_bwrap(
     overrides: dict[str, Any],
     persist: bool,
     layer_id: str,
+    sentinel: str = "",
 ) -> dict[str, Any]:
-    """Compose through bwrap_run bound to its own pack configuration."""
+    """Compose through bwrap_run bound to its own pack configuration.
+
+    The composed child streams its incremental output on this context's
+    event bus (the kernel's ``dispatch_child`` copies it into the child
+    context). The child's tap knows nothing of the bash sentinel, so the
+    wrapper's state block would flood the operator surface on the
+    sandboxed path. For the duration of the composed call the parent
+    swaps in a :class:`_MachineryFilterBus` carrying this session's
+    sentinel: machinery lines are dropped in the middle, everything else
+    passes through. The child keeps its copied reference until it
+    finishes, so an auto-backgrounded adoption still filters after this
+    call returns.
+    """
     dispatch = ctx.delegated_tool_dispatch
     if dispatch is None:
         return {"error": "bwrap sandbox dispatch is unavailable", "sandboxed": False}
-    tool_result = await dispatch(
-        "bwrap_run",
-        {
-            "argv": inner_argv,
-            "overrides": overrides,
-            "timeout_seconds": timeout_seconds,
-            "persist": persist,
-            "layer_id": layer_id,
-        },
-    )
+    original_bus = ctx.event_bus
+    # Idempotent: an already-filtering bus (left in place by a still-running
+    # auto-backgrounded adoption of an earlier call) keeps filtering — never
+    # stack wrappers race-ily over overlapping composed calls.
+    if (
+        original_bus is not None
+        and hasattr(original_bus, "publish")
+        and not isinstance(original_bus, _MachineryFilterBus)
+    ):
+        ctx.event_bus = _MachineryFilterBus(original_bus, sentinel=sentinel)
+    try:
+        tool_result = await dispatch(
+            "bwrap_run",
+            {
+                "argv": inner_argv,
+                "overrides": overrides,
+                "timeout_seconds": timeout_seconds,
+                "persist": persist,
+                "layer_id": layer_id,
+            },
+        )
+    finally:
+        ctx.event_bus = original_bus
     payload = dict(tool_result.output_json or {})
     if tool_result.error:
         return {
@@ -608,6 +721,7 @@ async def _run_background_command(
                 overrides=overrides,
                 persist=persist,
                 layer_id=layer_id,
+                sentinel=session.sentinel,
             )
             stdout_raw = payload.get("stdout_raw", "")
             stderr = payload.get("stderr", "")
@@ -625,6 +739,7 @@ async def _run_background_command(
                 timeout_seconds=None,
                 spill_dir=log_path.parent,
                 ctx=ctx,
+                sentinel=session.sentinel,
             )
             stdout_raw = proc["stdout_raw"]
             stderr = proc["stderr"]
@@ -697,8 +812,8 @@ async def _run_process_with_auto_background(
     stamp = secrets.token_hex(4)
     stdout_path = spill_dir / f"stdout-{stamp}.log"
     stderr_path = spill_dir / f"stderr-{stamp}.log"
-    stdout_tap = _maybe_tap(ctx, stream="stdout")
-    stderr_tap = _maybe_tap(ctx, stream="stderr")
+    stdout_tap = _maybe_tap(ctx, stream="stdout", sentinel=session.sentinel)
+    stderr_tap = _maybe_tap(ctx, stream="stderr", sentinel=session.sentinel)
     if stdout_tap is not None:
         stdout_task = asyncio.create_task(
             tapped_drain_to_file(process.stdout, stdout_path, stdout_tap)
@@ -844,6 +959,7 @@ async def run_in_session(
                         overrides=overrides or {},
                         persist=persist,
                         layer_id=layer_id,
+                        sentinel=session.sentinel,
                     ),
                     name="lisa-bash-sandboxed-fg",
                 )
@@ -944,6 +1060,7 @@ async def run_in_session(
                     overrides=overrides or {},
                     persist=persist,
                     layer_id=layer_id,
+                    sentinel=session.sentinel,
                 )
             if payload.get("error"):
                 # The sandbox itself reported a failure (e.g. bwrap missing on
@@ -1005,6 +1122,7 @@ async def run_in_session(
                     timeout_seconds=timeout_seconds,
                     spill_dir=spill_dir,
                     ctx=ctx,
+                    sentinel=session.sentinel,
                 )
             else:
                 proc = await _run_process_with_auto_background(
