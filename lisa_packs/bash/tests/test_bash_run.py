@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from kernel.capability_binding import ExecutionFloorView
 from pydantic import ValidationError
 
 from kernel.models import ToolExecutionContext
@@ -13,7 +14,9 @@ from lisa_packs.bash import executor as _executor
 from lisa_packs.bash.tools.bash_run import bash_run
 
 
-def _ctx(tmp_path: Path, command: str = "echo hi") -> ToolExecutionContext:
+def _ctx(
+    tmp_path: Path, command: str = "echo hi", *, execution: str = "bare"
+) -> ToolExecutionContext:
     return ToolExecutionContext(
         tool_id="bash_run",
         workspace_id="ws",
@@ -22,6 +25,7 @@ def _ctx(tmp_path: Path, command: str = "echo hi") -> ToolExecutionContext:
         session_plan_digest="d",
         parameters={"command": command},
         data_dir=str(tmp_path),
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution=execution),
     )
 
 
@@ -61,7 +65,7 @@ async def test_unsandboxed_reports_sandboxed_false(monkeypatch, tmp_path: Path) 
     assert result.error == ""
     assert result.output_text == "hi"
     assert result.output_json["sandboxed"] is False
-    assert "bwrap" in result.output_json["note"]
+    assert "permits bare execution" in result.output_json["note"]
     assert result.output_json["log_path"].endswith(".log")
 
 
@@ -93,7 +97,7 @@ async def test_sandboxed_composition_threaded(monkeypatch, tmp_path: Path) -> No
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    ctx = _ctx(tmp_path, command="touch /tmp/x")
+    ctx = _ctx(tmp_path, command="touch /tmp/x", execution="sandbox")
     ctx.parameters["overrides"] = {"network": "allow"}
     ctx.parameters["persist"] = True
     result = await bash_run.execute(ctx)
@@ -338,16 +342,16 @@ async def test_missing_bwrap_binary_sandbox_error_surfaces_missing(
         }
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    result = await bash_run.execute(_ctx(tmp_path))
-    assert "sandbox execution failed" in result.error
-    assert result.output_json["sandboxed"] is True
+    result = await bash_run.execute(_ctx(tmp_path, execution="sandbox"))
+    assert "requires contained execution" in result.error
+    assert result.output_json["sandboxed"] is False
     assert "bubblewrap" in " ".join(result.output_json["missing"])
     assert "zypper install bubblewrap" in result.output_json["doc"]
 
 
 @pytest.mark.asyncio
-async def test_missing_bwrap_binary_stamps_degraded_on_success(monkeypatch, tmp_path: Path) -> None:
-    """Registered-but-broken sandbox flags every successful result degraded."""
+async def test_missing_bwrap_binary_refuses_execution(monkeypatch, tmp_path: Path) -> None:
+    """A registered-but-broken sandbox must not execute or report success."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
     monkeypatch.setattr(
@@ -357,23 +361,13 @@ async def test_missing_bwrap_binary_stamps_degraded_on_success(monkeypatch, tmp_
     )
 
     async def _fake_run_in_session(ctx, session, command, **kwargs):
-        return {
-            "stdout": "ok",
-            "stderr": "",
-            "return_code": 0,
-            "timed_out": False,
-            "truncated": False,
-            "sandboxed": True,
-            "backend": "tmpfs",
-            "persistence": "ephemeral",
-        }
+        raise AssertionError("a missing sandbox must prevent execution")
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
-    result = await bash_run.execute(_ctx(tmp_path))
-    assert result.error == ""
-    assert result.output_json["sandboxed"] is True
-    assert result.output_json["degraded"] is True
-    assert "bubblewrap" in result.output_json["note"]
+    result = await bash_run.execute(_ctx(tmp_path, execution="sandbox"))
+    assert "requires contained execution" in result.error
+    assert result.output_json["sandboxed"] is False
+    assert "bubblewrap" in " ".join(result.output_json["missing"])
 
 
 @pytest.mark.asyncio
@@ -387,6 +381,6 @@ async def test_executor_exception_stamps_truthful_sandboxed(monkeypatch, tmp_pat
         raise RuntimeError("bwrap_run blew up")
 
     monkeypatch.setattr(bash_run, "run_in_session", _raise_run_in_session)
-    result = await bash_run.execute(_ctx(tmp_path))
+    result = await bash_run.execute(_ctx(tmp_path, execution="sandbox"))
     assert result.error
     assert result.output_json["sandboxed"] is True

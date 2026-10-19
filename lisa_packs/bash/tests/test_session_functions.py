@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from kernel.capability_binding import ExecutionFloorView
 
 from kernel.models import ToolExecutionContext
 
@@ -36,6 +37,7 @@ def _ctx(
         parameters={"command": "true", **params},
         data_dir=str(tmp_path),
         pack_config=pack_config or {},
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
     )
 
 
@@ -217,6 +219,7 @@ async def test_bash_run_function_replay_live(tmp_path: Path) -> None:
         parameters={"command": "lisa_fn_hello() { echo func-ran; }; lisa_fn_hello"},
         data_dir=str(tmp_path),
         pack_config=pack_config,
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
     )
     r1 = await bash_run.execute(first)
     assert r1.error == ""
@@ -228,6 +231,7 @@ async def test_bash_run_function_replay_live(tmp_path: Path) -> None:
         parameters={"command": "lisa_fn_hello"},
         data_dir=str(tmp_path),
         pack_config=pack_config,
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
     )
     r2 = await bash_run.execute(second)
     assert r2.error == ""
@@ -243,6 +247,7 @@ async def test_bash_run_function_replay_default_off(tmp_path: Path) -> None:
         workspace_id="ws",
         parameters={"command": "lisa_fn_bye() { echo one; }; lisa_fn_bye"},
         data_dir=str(tmp_path),
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
     )
     r1 = await bash_run.execute(first)
     assert r1.error == ""
@@ -253,6 +258,7 @@ async def test_bash_run_function_replay_default_off(tmp_path: Path) -> None:
         workspace_id="ws",
         parameters={"command": "lisa_fn_bye"},
         data_dir=str(tmp_path),
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
     )
     r2 = await bash_run.execute(second)
     assert r2.error == ""
@@ -280,6 +286,7 @@ async def test_bash_run_function_replay_pattern_filtering(tmp_path: Path) -> Non
         },
         data_dir=str(tmp_path),
         pack_config=pack_config,
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
     )
     r1 = await bash_run.execute(first)
     assert r1.error == ""
@@ -291,6 +298,7 @@ async def test_bash_run_function_replay_pattern_filtering(tmp_path: Path) -> Non
         parameters={"command": "lisa_fn_keep; lisa_fn_drop"},
         data_dir=str(tmp_path),
         pack_config=pack_config,
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
     )
     r2 = await bash_run.execute(second)
     assert r2.error == ""
