@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 from kernel.models import ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from lisa_packs.bash import read_authored_text
 from lisa_packs.bash.executor import (
@@ -74,6 +75,32 @@ class Parameters(BaseModel):
             "serializes, even if parallel is requested."
         ),
     )
+
+    @field_validator("commands", mode="before")
+    @classmethod
+    def _accept_json_list_string(cls, value: object) -> object:
+        """Accept a JSON-encoded list for ``commands`` (lenient model fix).
+
+        Under a JSON-mode (strict=False) tool schema weaker models
+        sometimes emit a list-valued parameter as a STRING containing the
+        JSON array instead of a real array. Observed in production on
+        2026-10-18 (four consecutive identical validation errors in one
+        turn: ``Input should be a valid list``, with the raw JSON payload
+        as ``input_value``); the model's retries reproduced the same
+        shape each time because nothing in the error told it why the
+        shape was wrong. Coercing a string that parses to a list of
+        strings into a real list is model-forgiving and cannot mask a
+        genuinely wrong request: a non-JSON string or a JSON
+        non-list falls through to the standard list_type error.
+        """
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+            return parsed
+        return value
+
     timeout_seconds: int = Field(default=30, ge=1, le=300)
     run_in_background: bool = Field(
         default=False,
@@ -128,12 +155,9 @@ class Parameters(BaseModel):
                 raise ValueError("`run_in_background` is not valid with `commands`")
             if len(self.commands) > MAX_BATCH_COMMANDS:
                 raise ValueError(
-                    f"commands is capped at {MAX_BATCH_COMMANDS} "
-                    f"(got {len(self.commands)})"
+                    f"commands is capped at {MAX_BATCH_COMMANDS} (got {len(self.commands)})"
                 )
-            if any(
-                not isinstance(item, str) or not item.strip() for item in self.commands
-            ):
+            if any(not isinstance(item, str) or not item.strip() for item in self.commands):
                 raise ValueError("every item in `commands` must be a non-empty string")
         if self.when not in ("auto", "parallel", "serial"):
             raise ValueError("`when` must be auto, parallel, or serial")

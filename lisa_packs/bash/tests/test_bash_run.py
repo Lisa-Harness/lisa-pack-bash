@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from kernel.models import ToolExecutionContext
 
@@ -133,6 +134,44 @@ async def test_commands_cap_enforced(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_commands_json_string_is_coerced_to_list() -> None:
+    """A JSON-encoded string for ``commands`` validates as a real list.
+
+    Regression for the 2026-10-18 production incident: under a JSON-mode
+    (strict=False) tool schema the model emitted ``commands`` as a STRING
+    containing the JSON array and four consecutive identical
+    ``Input should be a valid list`` validation errors burned turn
+    iterations (the model's retries reproduced the same shape each time —
+    its error message contained no explanation of the expected shape).
+    The lenient validator parses a string that decodes to a list; the
+    existing exclusivity/cap/emptiness rules still apply after coercion.
+    """
+    from lisa_packs.bash.tools.bash_run.bash_run import Parameters
+
+    params = Parameters.model_validate({"commands": '["echo a", "echo b"]'})
+    assert params.commands == ["echo a", "echo b"]
+    assert params.command is None
+
+
+@pytest.mark.asyncio
+async def test_commands_non_json_string_still_rejected() -> None:
+    """A plain (non-JSON) string for ``commands`` keeps the list_type error."""
+    from lisa_packs.bash.tools.bash_run.bash_run import Parameters
+
+    with pytest.raises(ValidationError):
+        Parameters.model_validate({"commands": "echo a"})
+
+
+@pytest.mark.asyncio
+async def test_commands_json_non_list_string_still_rejected() -> None:
+    """A JSON scalar (not a list) for ``commands`` keeps the list_type error."""
+    from lisa_packs.bash.tools.bash_run.bash_run import Parameters
+
+    with pytest.raises(ValidationError):
+        Parameters.model_validate({"commands": '"just a string"'})
+
+
+@pytest.mark.asyncio
 async def test_backgrounded_short_circuit(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
@@ -256,9 +295,7 @@ async def test_rc_recovers_truthful_exit_code(monkeypatch, tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_output_without_trailing_newline_preserved(
-    monkeypatch, tmp_path: Path
-) -> None:
+async def test_output_without_trailing_newline_preserved(monkeypatch, tmp_path: Path) -> None:
     """The rc marker must stay on its own line; final output line survives."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
@@ -309,9 +346,7 @@ async def test_missing_bwrap_binary_sandbox_error_surfaces_missing(
 
 
 @pytest.mark.asyncio
-async def test_missing_bwrap_binary_stamps_degraded_on_success(
-    monkeypatch, tmp_path: Path
-) -> None:
+async def test_missing_bwrap_binary_stamps_degraded_on_success(monkeypatch, tmp_path: Path) -> None:
     """Registered-but-broken sandbox flags every successful result degraded."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
@@ -342,9 +377,7 @@ async def test_missing_bwrap_binary_stamps_degraded_on_success(
 
 
 @pytest.mark.asyncio
-async def test_executor_exception_stamps_truthful_sandboxed(
-    monkeypatch, tmp_path: Path
-) -> None:
+async def test_executor_exception_stamps_truthful_sandboxed(monkeypatch, tmp_path: Path) -> None:
     """A raised (rather than error-result) sandbox failure stamps sandboxed=True."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
