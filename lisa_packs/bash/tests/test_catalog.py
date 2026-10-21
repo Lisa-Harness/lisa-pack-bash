@@ -54,9 +54,7 @@ def test_shell_mode_still_routable() -> None:
 
 def _declared_timeout_ceiling(tool_id: str) -> int:
     """Read the kernel wrapper timeout declared for ``tool_id``."""
-    catalog = json.loads(
-        build_tool_catalog_json(resolve_tool_roots([get_content_root()]))
-    )
+    catalog = json.loads(build_tool_catalog_json(resolve_tool_roots([get_content_root()])))
     return int(catalog[tool_id]["timeout_seconds"])
 
 

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from kernel.capability_binding import ExecutionFloorView
@@ -20,10 +22,14 @@ from sdk.identity import execution_scope_key
 
 from lisa_packs.bash import session as _session
 from lisa_packs.bash.operations.sandbox_facts import sandbox_facts as prewarm_op
-from lisa_packs.bash.session import SANDBOX_FACTS_DIRNAME, resolve_or_create_session
+from lisa_packs.bash.session import (
+    SANDBOX_FACTS_DIRNAME,
+    BashSession,
+    resolve_or_create_session,
+)
 
 
-def _ctx(tmp_path: Path, pack_config: dict | None = None) -> ToolExecutionContext:
+def _ctx(tmp_path: Path, pack_config: dict[str, Any] | None = None) -> ToolExecutionContext:
     return ToolExecutionContext(
         tool_id="bash_run",
         workspace_id="ws",
@@ -37,19 +43,22 @@ def _ctx(tmp_path: Path, pack_config: dict | None = None) -> ToolExecutionContex
 
 
 @pytest.fixture(autouse=True)
-def _fresh_sessions():
+def _fresh_sessions() -> Iterator[None]:
     _session._reset_sessions()
     yield
     _session._reset_sessions()
 
 
-def _read_fact(tmp_path: Path, session) -> dict:
+def _read_fact(tmp_path: Path, session: BashSession) -> dict[str, Any]:
     path = tmp_path / "run" / session.session_key / SANDBOX_FACTS_DIRNAME
     assert path.is_file(), f"containment fact not written at {path}"
-    return json.loads(path.read_text(encoding="utf-8"))
+    fact: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return fact
 
 
-def test_contained_state_published_when_sandboxed(monkeypatch, tmp_path: Path) -> None:
+def test_contained_state_published_when_sandboxed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(_session, "_sandbox_degraded", list)
     session = resolve_or_create_session(_ctx(tmp_path), sandboxed=True)
@@ -60,7 +69,9 @@ def test_contained_state_published_when_sandboxed(monkeypatch, tmp_path: Path) -
     assert fact["probed_at"]
 
 
-def test_degraded_state_published_with_reasons(monkeypatch, tmp_path: Path) -> None:
+def test_degraded_state_published_with_reasons(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Registered-but-unrunnable sandbox -> degraded with reasons to surface."""
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(
@@ -74,7 +85,9 @@ def test_degraded_state_published_with_reasons(monkeypatch, tmp_path: Path) -> N
     assert any("bwrap" in r for r in fact["reasons"])
 
 
-def test_none_state_published_when_no_sandbox(monkeypatch, tmp_path: Path) -> None:
+def test_none_state_published_when_no_sandbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """No sandbox pack at all -> none (fail-closed: the engine must prompt)."""
     monkeypatch.setattr(_session, "_sandbox_available", lambda: False)
     monkeypatch.setattr(_session, "_sandbox_degraded", list)
@@ -85,7 +98,7 @@ def test_none_state_published_when_no_sandbox(monkeypatch, tmp_path: Path) -> No
 
 
 def test_deliberate_bare_published_when_floor_permits_bare(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Bare floor + healthy sandbox -> deliberate_bare, NOT contained.
 
@@ -103,7 +116,9 @@ def test_deliberate_bare_published_when_floor_permits_bare(
     assert fact["reasons"] == []
 
 
-def test_fact_flip_to_deliberate_bare_on_reuse(monkeypatch, tmp_path: Path) -> None:
+def test_fact_flip_to_deliberate_bare_on_reuse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A cached contained session flips to deliberate_bare when the floor changes."""
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(_session, "_sandbox_degraded", list)
@@ -117,7 +132,9 @@ def test_fact_flip_to_deliberate_bare_on_reuse(monkeypatch, tmp_path: Path) -> N
     assert fact["containment"] == "deliberate_bare"
 
 
-def test_fact_is_refreshed_on_session_reuse(monkeypatch, tmp_path: Path) -> None:
+def test_fact_is_refreshed_on_session_reuse(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A cached session re-publishes the fact so a mid-session flip is picked up."""
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(_session, "_sandbox_degraded", list)
@@ -152,7 +169,7 @@ def test_session_key_survives_session_plan_edits(tmp_path: Path) -> None:
     assert execution_scope_key(edited) == before
 
 
-def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
+def test_pre_turn_operation_prewarms_fact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The shell pre-turn op resolves the session (writing the fact) before the model call."""
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(_session, "_sandbox_degraded", list)
@@ -172,7 +189,7 @@ def test_pre_turn_operation_prewarms_fact(monkeypatch, tmp_path: Path) -> None:
     assert list((tmp_path / "run" / expected).glob(SANDBOX_FACTS_DIRNAME))
 
 
-def test_pre_turn_uses_bwrap_owner_floor(monkeypatch, tmp_path: Path) -> None:
+def test_pre_turn_uses_bwrap_owner_floor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(_session, "_sandbox_available", lambda: True)
     monkeypatch.setattr(_session, "_sandbox_degraded", list)
     op_ctx = OperationExecutionContext(

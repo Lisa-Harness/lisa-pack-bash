@@ -16,7 +16,7 @@ from pathlib import Path
 
 from lisa_packs.bash import get_content_root
 
-__all__ = ["RenderedRc", "render_rc", "SessionPriming"]
+__all__ = ["RenderedRc", "SessionPriming", "render_rc"]
 
 _TEMPLATE_RELATIVE = Path("content") / "profile" / "lisa.rc.tmpl"
 

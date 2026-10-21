@@ -9,6 +9,11 @@ from kernel.models import ToolExecutionContext, ToolResult
 
 from lisa_packs.bash import executor
 
+#: Exit codes used by the sentinel-parsing fixtures. ``127`` is the
+#: shell's "command not found" code; ``3`` is an arbitrary nonzero code.
+_COMMAND_NOT_FOUND_RC = 127
+_NONZERO_RC = 3
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -33,11 +38,7 @@ async def test_bwrap_dispatch_rejects_unverified_result(payload: dict[str, objec
 
 def test_parse_output_strips_sentinel_and_rc() -> None:
     sentinel = "LISA_ABC>> "
-    raw = (
-        "hello world\n"
-        "second line\n"
-        f"{sentinel}rc=0\n"
-    )
+    raw = f"hello world\nsecond line\n{sentinel}rc=0\n"
     parsed = executor._parse_output(raw, sentinel)
     assert parsed.return_code == 0
     assert "hello world" in parsed.body
@@ -48,17 +49,17 @@ def test_parse_output_strips_sentinel_and_rc() -> None:
 
 def test_parse_output_nonzero_rc() -> None:
     sentinel = "LISA_X>> "
-    raw = f"err output\n{sentinel}rc=127\n"
+    raw = f"err output\n{sentinel}rc={_COMMAND_NOT_FOUND_RC}\n"
     parsed = executor._parse_output(raw, sentinel)
-    assert parsed.return_code == 127
+    assert parsed.return_code == _COMMAND_NOT_FOUND_RC
     assert "err output" in parsed.body
 
 
 def test_parse_output_prompt_only_lines_dropped() -> None:
     sentinel = "LISA_P>> "
-    raw = f"{sentinel}\nvalue\n{sentinel}rc=3\n{sentinel}"
+    raw = f"{sentinel}\nvalue\n{sentinel}rc={_NONZERO_RC}\n{sentinel}"
     parsed = executor._parse_output(raw, sentinel)
-    assert parsed.return_code == 3
+    assert parsed.return_code == _NONZERO_RC
     assert parsed.body.strip() == "value"
 
 
@@ -164,17 +165,13 @@ def test_is_auto_background_guarded() -> None:
 
 
 def test_resolve_batch_schedule_auto_parallel_when_bare() -> None:
-    schedule, reason = executor.resolve_batch_schedule(
-        "auto", sandboxed=False
-    )
+    schedule, reason = executor.resolve_batch_schedule("auto", sandboxed=False)
     assert schedule == "parallel"
     assert reason is None
 
 
 def test_resolve_batch_schedule_overlay_downgrades_parallel() -> None:
-    schedule, reason = executor.resolve_batch_schedule(
-        "parallel", sandboxed=True, persist=True
-    )
+    schedule, reason = executor.resolve_batch_schedule("parallel", sandboxed=True, persist=True)
     assert schedule == "serial"
     assert reason is not None
     assert "overlay" in reason
@@ -204,17 +201,13 @@ def test_resolve_batch_schedule_plain_rw_paths_stay_parallel() -> None:
 
 
 def test_resolve_batch_schedule_layer_id_is_overlay() -> None:
-    schedule, reason = executor.resolve_batch_schedule(
-        "auto", sandboxed=True, layer_id="layer-1"
-    )
+    schedule, reason = executor.resolve_batch_schedule("auto", sandboxed=True, layer_id="layer-1")
     assert schedule == "serial"
     assert reason is not None
 
 
 def test_resolve_batch_schedule_explicit_serial() -> None:
-    schedule, reason = executor.resolve_batch_schedule(
-        "serial", sandboxed=False
-    )
+    schedule, reason = executor.resolve_batch_schedule("serial", sandboxed=False)
     assert schedule == "serial"
     assert reason is None
 
@@ -239,6 +232,4 @@ def test_floor_posture_payload_extracts_axes() -> None:
     # Unset floor -> empty payload (never guessed).
     assert _floor_posture_payload(None) == {}
     # Aliased persistence ('direct') is NOT the bwrap token set: excluded.
-    assert "persistence" not in _floor_posture_payload(
-        ExecutionFloorView(persistence="direct")
-    )
+    assert "persistence" not in _floor_posture_payload(ExecutionFloorView(persistence="direct"))

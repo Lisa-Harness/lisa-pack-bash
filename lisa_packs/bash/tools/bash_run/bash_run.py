@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -15,6 +17,7 @@ from lisa_packs.bash.executor import (
     run_in_session,
 )
 from lisa_packs.bash.session import (
+    BashSession,
     SandboxRequiredButUnavailable,
     _floor_requires_sandbox,
     _sandbox_available,
@@ -129,7 +132,7 @@ class Parameters(BaseModel):
             "changes (only when sandboxed)."
         ),
     )
-    overrides: dict = Field(
+    overrides: dict[str, Any] = Field(
         default_factory=dict,
         description=(
             "Tightening overrides for the sandbox, keyed by axis: persistence "
@@ -164,6 +167,280 @@ class Parameters(BaseModel):
         return self
 
 
+@dataclass(slots=True)
+class _Posture:
+    """The sandbox posture decided for one call.
+
+    ``sandboxed`` is whether the call composes through bwrap;
+    ``deliberate_bare`` distinguishes "the floor chose bare" from "the
+    sandbox is broken" (a degraded posture).
+    """
+
+    sandboxed: bool
+    deliberate_bare: bool
+    degraded_reasons: list[str]
+
+
+def _missing_sandbox_result(reasons: list[str]) -> ToolResult:
+    """The hard error returned when the floor mandates a sandbox that cannot run."""
+    exc = SandboxRequiredButUnavailable(reasons)
+    return ToolResult(
+        tool_id=TOOL_ID,
+        error=str(exc),
+        output_json={
+            "sandboxed": False,
+            "missing": exc.reasons,
+            "doc": read_authored_text("prompts/bwrap_missing.md"),
+        },
+    )
+
+
+def _decide_posture(ctx: ToolExecutionContext, params: Parameters) -> _Posture | ToolResult:
+    """Decide the sandbox posture for this call.
+
+    Returns a :class:`_Posture` when the call may proceed, or the hard-error
+    :class:`ToolResult` the floor demands when the sandbox is required but
+    unavailable.
+    """
+    available = _sandbox_available()
+    degraded_reasons = _sandbox_degraded() if available else []
+    requires = _floor_requires_sandbox(ctx)
+    if requires is True:
+        if not available:
+            return _missing_sandbox_result(["sandbox pack not installed"])
+        if degraded_reasons:
+            return _missing_sandbox_result(degraded_reasons)
+        return _Posture(sandboxed=True, deliberate_bare=False, degraded_reasons=degraded_reasons)
+    if not available:
+        # The floor deliberately permits bare execution (e.g. on a host without
+        # bwrap): run bare by choice, stamped distinctly from a broken sandbox.
+        return _Posture(sandboxed=False, deliberate_bare=True, degraded_reasons=degraded_reasons)
+    if not _wants_sandbox(params):
+        # Floor bare + healthy sandbox + no tightening request: bare is the
+        # harness's chosen posture, not a fallback. The model can still opt
+        # into containment per call via persist/layer_id/overrides.
+        return _Posture(sandboxed=False, deliberate_bare=True, degraded_reasons=degraded_reasons)
+    return _Posture(sandboxed=True, deliberate_bare=False, degraded_reasons=degraded_reasons)
+
+
+def _degraded_doc(posture: _Posture) -> str:
+    """The authored doc that explains this call's degraded posture."""
+    if not posture.sandboxed and not posture.deliberate_bare:
+        return read_authored_text("prompts/bash_no_sandbox.md")
+    if posture.degraded_reasons:
+        return read_authored_text("prompts/bwrap_missing.md")
+    return ""
+
+
+def _run_params(
+    ctx: ToolExecutionContext,
+    session: BashSession,
+    params: Parameters,
+) -> Awaitable[dict[str, Any]]:
+    """Dispatch the validated parameters to the single-command or batch path."""
+    if params.commands is not None:
+        return run_batch_in_session(
+            ctx,
+            session,
+            params.commands,
+            timeout_seconds=params.timeout_seconds,
+            when=params.when,
+            overrides=params.overrides,
+            persist=params.persist,
+            layer_id=params.layer_id,
+        )
+    return run_in_session(
+        ctx,
+        session,
+        params.command or "",
+        timeout_seconds=params.timeout_seconds,
+        run_in_background=params.run_in_background,
+        overrides=params.overrides,
+        persist=params.persist,
+        layer_id=params.layer_id,
+    )
+
+
+def _backgrounded_output_json(
+    result: dict[str, Any],
+    *,
+    sandboxed: bool,
+) -> dict[str, Any]:
+    """The output_json for a backgrounded job descriptor."""
+    output_json: dict[str, Any] = {
+        "backgrounded": True,
+        "job_id": result["job_id"],
+        "log_path": result["log_path"],
+        "rc_path": result["rc_path"],
+        "status_path": result.get("status_path"),
+        "status": "running",
+        "sandboxed": result.get("sandboxed", sandboxed),
+    }
+    if result.get("background_jobs"):
+        output_json["background_jobs"] = result["background_jobs"]
+    if result.get("auto_backgrounded_on_timeout"):
+        output_json["auto_backgrounded_on_timeout"] = True
+        output_json["note"] = (
+            f"Command did not complete within {result['timeout_seconds']}s "
+            "and was moved to the background. Poll rc_path / log_path for "
+            "completion; the rc file will contain the exit code when done."
+        )
+    else:
+        output_json["note"] = (
+            "Running in the background. Poll rc_path / log_path for "
+            "completion; the rc file will contain the exit code when done."
+        )
+    return output_json
+
+
+def _batch_output_json(
+    result: dict[str, Any],
+    *,
+    sandboxed: bool,
+    deliberate_bare: bool,
+    log_path: str,
+) -> dict[str, Any]:
+    """The output_json for a batch result envelope."""
+    output_json: dict[str, Any] = {
+        "batch": True,
+        "when": result.get("when"),
+        "requested_when": result.get("requested_when"),
+        "results": result.get("results") or [],
+        "return_code": result.get("return_code", 0),
+        "sandboxed": result.get("sandboxed", sandboxed),
+        "timed_out": result.get("timed_out", False),
+        "truncated": result.get("truncated", False),
+        "log_path": log_path,
+    }
+    if result.get("reason"):
+        output_json["reason"] = result["reason"]
+    if result.get("note"):
+        output_json["shaping_note"] = result["note"]
+    if result.get("background_jobs"):
+        output_json["background_jobs"] = result["background_jobs"]
+    output_json.update(_posture_output_json(sandboxed=sandboxed, deliberate_bare=deliberate_bare))
+    return output_json
+
+
+def _posture_output_json(*, sandboxed: bool, deliberate_bare: bool) -> dict[str, Any]:
+    """The posture fields appended to every result.
+
+    ``note`` is reserved for sandbox/posture messages; the shaping note
+    lives on its own ``shaping_note`` field.
+    """
+    if deliberate_bare:
+        return {
+            "mode": "bare",
+            "note": (
+                "Running unsandboxed on the host because the sandbox floor for this "
+                "session permits bare execution. Changes are permanent - confirm "
+                "before mutating."
+            ),
+        }
+    if not sandboxed:
+        return {
+            "note": (
+                "bwrap pack not installed: running unsandboxed on the host. "
+                "See sandboxing_degraded.md to enable the sandbox."
+            )
+        }
+    return {}
+
+
+def _sandbox_detail_output_json(result: dict[str, Any]) -> dict[str, Any]:
+    """The sandbox-specific detail fields of a single-command result."""
+    detail: dict[str, Any] = {}
+    if result.get("backend"):
+        detail["backend"] = result["backend"]
+        detail["layer_id"] = result.get("layer_id")
+        detail["persistence"] = result.get("persistence")
+        if result.get("capture_root"):
+            detail["capture_root"] = result["capture_root"]
+        if result.get("scratch_dir"):
+            detail["scratch_dir"] = result["scratch_dir"]
+        if result.get("identity"):
+            detail["identity"] = result["identity"]
+    if result.get("degraded"):
+        detail["degraded"] = True
+        detail["note"] = result.get("note")
+    return detail
+
+
+def _command_output_json(
+    result: dict[str, Any],
+    *,
+    sandboxed: bool,
+    deliberate_bare: bool,
+    degraded_reasons: list[str],
+    log_path: str,
+) -> dict[str, Any]:
+    """The output_json for a single-command result."""
+    output_json: dict[str, Any] = {
+        "return_code": result["return_code"],
+        "stderr": result["stderr"],
+        "sandboxed": result["sandboxed"],
+        "timed_out": result["timed_out"],
+        "truncated": result["truncated"],
+        "log_path": log_path,
+    }
+    if result.get("background_jobs"):
+        output_json["background_jobs"] = result["background_jobs"]
+    # Spill-to-file: surfaced when stdout/stderr were truncated, giving the
+    # model a stable path to inspect rather than re-running the command.
+    for spill_key in ("stdout_path", "stderr_path", "stdout_bytes", "stderr_bytes"):
+        if result.get(spill_key):
+            output_json[spill_key] = result[spill_key]
+    # Shaping: pipe-stage failures and benign informational conditions the
+    # model must not mistake for a hard failure.
+    if result.get("pipe_statuses"):
+        output_json["pipe_statuses"] = result["pipe_statuses"]
+    output_json.update(_sandbox_detail_output_json(result))
+    if result.get("note"):
+        # Shaping note (benign rc=1, pipe-stage failure, empty output) goes on
+        # its own field; `note` is reserved for sandbox/posture messages.
+        output_json["shaping_note"] = result["note"]
+    output_json.update(_posture_output_json(sandboxed=sandboxed, deliberate_bare=deliberate_bare))
+    if degraded_reasons and not deliberate_bare and sandboxed:
+        # Pack registered but host prerequisites missing: surface loudly on
+        # every result, never silently. bwrap_run re-probes per call and
+        # reports hard failures explicitly; this is the persistent heads-up.
+        output_json["degraded"] = True
+        output_json["sandbox_missing"] = degraded_reasons
+        output_json["note"] = (
+            "Sandbox prerequisites missing on this host: "
+            + "; ".join(degraded_reasons)
+            + ". See bwrap_missing.md to fix it."
+        )
+    return output_json
+
+
+def _result_output_json(
+    result: dict[str, Any],
+    *,
+    sandboxed: bool,
+    deliberate_bare: bool,
+    degraded_reasons: list[str],
+    log_path: str,
+) -> dict[str, Any]:
+    """The output_json for a successful (non-error) command or batch result."""
+    if result.get("backgrounded"):
+        return _backgrounded_output_json(result, sandboxed=sandboxed)
+    if result.get("batch"):
+        return _batch_output_json(
+            result,
+            sandboxed=sandboxed,
+            deliberate_bare=deliberate_bare,
+            log_path=log_path,
+        )
+    return _command_output_json(
+        result,
+        sandboxed=sandboxed,
+        deliberate_bare=deliberate_bare,
+        degraded_reasons=degraded_reasons,
+        log_path=log_path,
+    )
+
+
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
     """Execute a command in the persistent, sandbox-aware bash session."""
     try:
@@ -179,76 +456,19 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             output_json={"missing": ["bash"], "doc": install_doc},
         )
 
-    available = _sandbox_available()
-    degraded_reasons = _sandbox_degraded() if available else []
-    requires = _floor_requires_sandbox(ctx)
-    sandboxed = available
-    deliberate_bare = False
-    if requires is True:
-        if not available:
-            exc = SandboxRequiredButUnavailable(["sandbox pack not installed"])
-            return ToolResult(
-                tool_id=TOOL_ID,
-                error=str(exc),
-                output_json={
-                    "sandboxed": False,
-                    "missing": exc.reasons,
-                    "doc": read_authored_text("prompts/bwrap_missing.md"),
-                },
-            )
-        if degraded_reasons:
-            exc = SandboxRequiredButUnavailable(degraded_reasons)
-            return ToolResult(
-                tool_id=TOOL_ID,
-                error=str(exc),
-                output_json={
-                    "sandboxed": False,
-                    "missing": degraded_reasons,
-                    "doc": read_authored_text("prompts/bwrap_missing.md"),
-                },
-            )
-    elif requires is False and not available:
-        # The floor deliberately permits bare execution (e.g. on a host without
-        # bwrap): run bare by choice, stamped distinctly from a broken sandbox.
-        sandboxed = False
-        deliberate_bare = True
-    elif requires is False and available and not _wants_sandbox(params):
-        # Floor bare + healthy sandbox + no tightening request: bare is the
-        # harness's chosen posture, not a fallback. The model can still opt
-        # into containment per call via persist/layer_id/overrides.
-        sandboxed = False
-        deliberate_bare = True
+    decided = _decide_posture(ctx, params)
+    if isinstance(decided, ToolResult):
+        return decided
+    posture = decided
+    sandboxed = posture.sandboxed
+    deliberate_bare = posture.deliberate_bare
+    degraded_reasons = posture.degraded_reasons
 
     session = resolve_or_create_session(ctx, sandboxed=sandboxed)
-    degraded_doc = ""
-    if not sandboxed and not deliberate_bare:
-        degraded_doc = read_authored_text("prompts/bash_no_sandbox.md")
-    elif degraded_reasons:
-        degraded_doc = read_authored_text("prompts/bwrap_missing.md")
+    degraded_doc = _degraded_doc(posture)
 
     try:
-        if params.commands is not None:
-            result = await run_batch_in_session(
-                ctx,
-                session,
-                params.commands,
-                timeout_seconds=params.timeout_seconds,
-                when=params.when,
-                overrides=params.overrides,
-                persist=params.persist,
-                layer_id=params.layer_id,
-            )
-        else:
-            result = await run_in_session(
-                ctx,
-                session,
-                params.command or "",
-                timeout_seconds=params.timeout_seconds,
-                run_in_background=params.run_in_background,
-                overrides=params.overrides,
-                persist=params.persist,
-                layer_id=params.layer_id,
-            )
+        result = await _run_params(ctx, session, params)
     except Exception as exc:
         return ToolResult(
             tool_id=TOOL_ID,
@@ -274,135 +494,14 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             output_json=output_json,
         )
 
-    # Backgrounded short-circuit: return the job descriptor as output_json.
-    if result.get("backgrounded"):
-        output_json = {
-            "backgrounded": True,
-            "job_id": result["job_id"],
-            "log_path": result["log_path"],
-            "rc_path": result["rc_path"],
-            "status_path": result.get("status_path"),
-            "status": "running",
-            "sandboxed": result.get("sandboxed", sandboxed),
-        }
-        if result.get("background_jobs"):
-            output_json["background_jobs"] = result["background_jobs"]
-        if result.get("auto_backgrounded_on_timeout"):
-            output_json["auto_backgrounded_on_timeout"] = True
-            output_json["note"] = (
-                f"Command did not complete within {result['timeout_seconds']}s "
-                "and was moved to the background. Poll rc_path / log_path for "
-                "completion; the rc file will contain the exit code when done."
-            )
-        else:
-            output_json["note"] = (
-                "Running in the background. Poll rc_path / log_path for "
-                "completion; the rc file will contain the exit code when done."
-            )
-        return ToolResult(
-            tool_id=TOOL_ID,
-            output_text="",
-            output_json=output_json,
-        )
-
-    if result.get("batch"):
-        output_json = {
-            "batch": True,
-            "when": result.get("when"),
-            "requested_when": result.get("requested_when"),
-            "results": result.get("results") or [],
-            "return_code": result.get("return_code", 0),
-            "sandboxed": result.get("sandboxed", sandboxed),
-            "timed_out": result.get("timed_out", False),
-            "truncated": result.get("truncated", False),
-            "log_path": str(session.log_path),
-        }
-        if result.get("reason"):
-            output_json["reason"] = result["reason"]
-        if result.get("note"):
-            output_json["shaping_note"] = result["note"]
-        if result.get("background_jobs"):
-            output_json["background_jobs"] = result["background_jobs"]
-        if deliberate_bare:
-            output_json["mode"] = "bare"
-            output_json["note"] = (
-                "Running unsandboxed on the host because the sandbox floor for this "
-                "session permits bare execution. Changes are permanent - confirm "
-                "before mutating."
-            )
-        elif not sandboxed:
-            output_json["note"] = (
-                "bwrap pack not installed: running unsandboxed on the host. "
-                "See sandboxing_degraded.md to enable the sandbox."
-            )
-        return ToolResult(
-            tool_id=TOOL_ID,
-            output_text="",
-            output_json=output_json,
-        )
-
-    output_json = {
-        "return_code": result["return_code"],
-        "stderr": result["stderr"],
-        "sandboxed": result["sandboxed"],
-        "timed_out": result["timed_out"],
-        "truncated": result["truncated"],
-        "log_path": str(session.log_path),
-    }
-    if result.get("background_jobs"):
-        output_json["background_jobs"] = result["background_jobs"]
-    # Spill-to-file: surfaced when stdout/stderr were truncated, giving the
-    # model a stable path to inspect rather than re-running the command.
-    for spill_key in ("stdout_path", "stderr_path", "stdout_bytes", "stderr_bytes"):
-        if result.get(spill_key):
-            output_json[spill_key] = result[spill_key]
-    # Shaping: pipe-stage failures and benign informational conditions the
-    # model must not mistake for a hard failure.
-    if result.get("pipe_statuses"):
-        output_json["pipe_statuses"] = result["pipe_statuses"]
-    if result.get("backend"):
-        output_json["backend"] = result["backend"]
-        output_json["layer_id"] = result.get("layer_id")
-        output_json["persistence"] = result.get("persistence")
-        if result.get("capture_root"):
-            output_json["capture_root"] = result["capture_root"]
-        if result.get("scratch_dir"):
-            output_json["scratch_dir"] = result["scratch_dir"]
-        if result.get("identity"):
-            output_json["identity"] = result["identity"]
-    if result.get("degraded"):
-        output_json["degraded"] = True
-        output_json["note"] = result.get("note")
-    if result.get("note"):
-        # Shaping note (benign rc=1, pipe-stage failure, empty output) goes on
-        # its own field; `note` is reserved for sandbox/posture messages.
-        output_json["shaping_note"] = result["note"]
-    if deliberate_bare:
-        output_json["mode"] = "bare"
-        output_json["note"] = (
-            "Running unsandboxed on the host because the sandbox floor for this "
-            "session permits bare execution. Changes are permanent - confirm "
-            "before mutating."
-        )
-    elif not sandboxed:
-        output_json["note"] = (
-            "bwrap pack not installed: running unsandboxed on the host. "
-            "See sandboxing_degraded.md to enable the sandbox."
-        )
-    elif degraded_reasons:
-        # Pack registered but host prerequisites missing: surface loudly on
-        # every result, never silently. bwrap_run re-probes per call and
-        # reports hard failures explicitly; this is the persistent heads-up.
-        output_json["degraded"] = True
-        output_json["sandbox_missing"] = degraded_reasons
-        output_json["note"] = (
-            "Sandbox prerequisites missing on this host: "
-            + "; ".join(degraded_reasons)
-            + ". See bwrap_missing.md to fix it."
-        )
-
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=result["stdout"],
-        output_json=output_json,
+        output_text=result.get("stdout", ""),
+        output_json=_result_output_json(
+            result,
+            sandboxed=sandboxed,
+            deliberate_bare=deliberate_bare,
+            degraded_reasons=degraded_reasons,
+            log_path=str(session.log_path),
+        ),
     )

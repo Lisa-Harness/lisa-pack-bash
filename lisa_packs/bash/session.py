@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import importlib
 import json
 import logging
 import shlex
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolExecutionContext
@@ -110,7 +111,7 @@ def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
     return policy
 
 
-class SessionResult(dict):
+class SessionResult(dict[str, Any]):
     """Structured per-command result (a dict to keep ToolResult json simple)."""
 
 
@@ -144,7 +145,7 @@ def _floor_requires_sandbox(ctx: ToolExecutionContext) -> bool:
     return floor is None or floor.execution != "bare"
 
 
-class SandboxRequiredButUnavailable(RuntimeError):  # noqa: N818 - not a tool error
+class SandboxRequiredButUnavailable(RuntimeError):
     """The floor mandates sandboxed execution but the bwrap pack cannot run."""
 
     def __init__(self, reasons: list[str]) -> None:
@@ -159,6 +160,18 @@ class SandboxRequiredButUnavailable(RuntimeError):  # noqa: N818 - not a tool er
         )
 
 
+class _BwrapCapabilities(Protocol):
+    """Structural view of the bwrap pack's capability report."""
+
+    missing: Sequence[str]
+
+
+class _BwrapProbeModule(Protocol):
+    """Structural view of ``lisa_packs.bwrap.probe``'s public surface."""
+
+    detect_capabilities: Callable[..., _BwrapCapabilities]
+
+
 def _sandbox_degraded() -> list[str]:
     """Report sandbox gaps when the pack is registered but the host cannot run it.
 
@@ -170,10 +183,11 @@ def _sandbox_degraded() -> list[str]:
     if not _sandbox_available():
         return []
     try:
-        from lisa_packs.bwrap.probe import detect_capabilities
+        module = importlib.import_module("lisa_packs.bwrap.probe")
     except ImportError:  # pragma: no cover - bwrap pack always present when registered
         return ["bubblewrap capability probe is unavailable"]
-    return list(detect_capabilities().missing)
+    probe = cast(_BwrapProbeModule, module)
+    return list(probe.detect_capabilities().missing)
 
 
 class BashSession:
@@ -197,16 +211,14 @@ class BashSession:
         self._rc: object | None = None
         # Job registry: backgrounded commands tracked by id. Values are
         # host-side asyncio.Tasks; artifacts live under jobs_dir.
-        self.jobs: dict[str, asyncio.Task] = {}
+        self.jobs: dict[str, asyncio.Task[Any]] = {}
         # Baseline: what the rc already exports/defines before the model ever
         # runs anything. Carryover deltas are computed against these so the
         # rc's own exports (LANG, TERM, NO_COLOR…) and functions aren't
         # treated as state to replay.
         self._base_env: frozenset[str] = initial_env or frozenset()
         self._base_funcs: frozenset[str] = initial_funcs or frozenset()
-        self._state_policy: dict[str, Any] = dict(
-            _DEFAULT_SESSION_STATE, **(state_policy or {})
-        )
+        self._state_policy: dict[str, Any] = dict(_DEFAULT_SESSION_STATE, **(state_policy or {}))
 
     @property
     def jobs_dir(self) -> Path:
@@ -281,7 +293,7 @@ class BashSession:
             base.with_suffix(".status.json"),
         )
 
-    def register_job(self, job_id: str, task: "asyncio.Task[Any]") -> None:
+    def register_job(self, job_id: str, task: asyncio.Task[Any]) -> None:
         """Add a running background job and persist a ``running`` status file."""
         self.jobs[job_id] = task
         log_path, rc_path, status_path = self.job_artifacts(job_id)
@@ -332,16 +344,10 @@ class BashSession:
             return
         path = self.priming.state_path
         try:
-            existing = (
-                path.read_text(encoding="utf-8")
-                if path.is_file()
-                else _STATE_HEADER + "\n"
-            )
+            existing = path.read_text(encoding="utf-8") if path.is_file() else _STATE_HEADER + "\n"
             lines = existing.splitlines()
             split_at = (
-                lines.index(_FUNCTIONS_SECTION)
-                if _FUNCTIONS_SECTION in lines
-                else len(lines)
+                lines.index(_FUNCTIONS_SECTION) if _FUNCTIONS_SECTION in lines else len(lines)
             )
             head = [ln for ln in lines[:split_at] if not ln.startswith("cd ")]
             if not head:
@@ -471,7 +477,10 @@ def _floor_posture_payload(floor: ExecutionFloorView | None) -> dict[str, Any]:
         out["execution"] = floor.execution
     persistence = floor.persistence
     if isinstance(persistence, str) and persistence in (
-        "direct-write", "overlay", "ephemeral", "readonly",
+        "direct-write",
+        "overlay",
+        "ephemeral",
+        "readonly",
     ):
         out["persistence"] = persistence
     captured = sorted(str(path) for path, access in floor.paths.items() if access == "capture")
@@ -480,9 +489,7 @@ def _floor_posture_payload(floor: ExecutionFloorView | None) -> dict[str, Any]:
     return out
 
 
-def _write_containment_fact(
-    session: BashSession, ctx: ToolExecutionContext | None = None
-) -> None:
+def _write_containment_fact(session: BashSession, ctx: ToolExecutionContext | None = None) -> None:
     """Publish this session's containment fact for the host approval engine.
 
     Writes ``<data_dir>/sandbox-facts/<session_key>.json`` atomically so the
@@ -498,7 +505,7 @@ def _write_containment_fact(
     stale ``contained`` fact.
     """
     state, reasons = _containment_current(ctx)
-    payload = {
+    payload: dict[str, Any] = {
         "tool_id": "bash_run",
         "containment": state,
         "reasons": reasons,
@@ -513,7 +520,7 @@ def _write_containment_fact(
         posture = _floor_posture_payload(_bwrap_floor(ctx)) if ctx is not None else {}
         if posture:
             payload["floor_posture"] = posture
-    except Exception:  # noqa: BLE001 - the fact must never fail to publish
+    except Exception:  # pylint: disable=broad-except  # the fact must never fail to publish
         pass
     path = session.data_dir / _RUN_DIR_NAME / session.session_key / SANDBOX_FACTS_DIRNAME
     try:
