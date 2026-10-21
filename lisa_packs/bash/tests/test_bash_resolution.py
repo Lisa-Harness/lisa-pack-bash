@@ -9,7 +9,7 @@ resolver prefers a real POSIX bash over such a launcher.
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -66,14 +66,15 @@ def test_bash_available_is_false_without_any_bash(monkeypatch: pytest.MonkeyPatc
 
 
 def test_path_glob_candidates_exist_on_this_host() -> None:
-    """Each declared bash location is an absolute path on its own platform.
+    """Each declared bash location is absolute for the platform it targets.
 
     A relative entry would resolve against the process working directory,
-    which is not where a shell lives. The Windows candidates are only
-    absolute on Windows, so they are checked there.
+    which is not where a shell lives. The POSIX candidates are absolute on
+    POSIX and the Windows candidates are absolute on Windows, so each is
+    checked against its own flavour.
     """
     for candidate in session._POSIX_BASH_GLOBS:
         if candidate.startswith("C:"):
-            assert candidate.startswith("C:\\")
-            continue
-        assert Path(candidate).is_absolute()
+            assert PureWindowsPath(candidate).is_absolute()
+        else:
+            assert PurePosixPath(candidate).is_absolute()
