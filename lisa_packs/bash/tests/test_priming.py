@@ -33,10 +33,10 @@ def test_render_rc_disables_history_and_sets_dumb_term(tmp_path: Path) -> None:
     )
     assert "set +H" in content
     assert "HISTSIZE=0" in content
-    assert 'export TERM=dumb' in content
+    assert "export TERM=dumb" in content
     assert "PROMPT_COMMAND" in content
     assert "NO_COLOR" in content
-    assert 'STATE_FILE' not in content  # placeholder already substituted
+    assert "STATE_FILE" not in content  # placeholder already substituted
     assert '[ -f "' in content  # state file source present
 
 

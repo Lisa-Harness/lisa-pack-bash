@@ -10,10 +10,11 @@ import asyncio
 import json
 import shutil
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
-
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash import executor as _executor
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.live
 
 
 @pytest.fixture(autouse=True)
-def _fresh_sessions():
+def _fresh_sessions() -> Iterator[None]:
     _executor._reset_for_tests()
     yield
     _executor._reset_for_tests()
@@ -31,7 +32,9 @@ def _fresh_sessions():
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_roundtrip_unsandboxed(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_roundtrip_unsandboxed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = ToolExecutionContext(
         tool_id="bash_run",
@@ -51,7 +54,7 @@ async def test_bash_run_roundtrip_unsandboxed(monkeypatch, tmp_path: Path) -> No
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_cwd_carries_over(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_cwd_carries_over(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """cd in one call must be visible in the next call (state carryover)."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     subdir = tmp_path / "workdir"
@@ -77,7 +80,9 @@ async def test_bash_run_cwd_carries_over(monkeypatch, tmp_path: Path) -> None:
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_export_carries_over(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_export_carries_over(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """An exported var from one call reaches the next."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     first = ToolExecutionContext(
@@ -91,7 +96,7 @@ async def test_bash_run_export_carries_over(monkeypatch, tmp_path: Path) -> None
     second = ToolExecutionContext(
         tool_id="bash_run",
         workspace_id="ws",
-        parameters={"command": "echo \"val=$LISA_CARRY_TEST\""},
+        parameters={"command": 'echo "val=$LISA_CARRY_TEST"'},
         data_dir=str(tmp_path),
     )
     r2 = await bash_run.execute(second)
@@ -101,7 +106,9 @@ async def test_bash_run_export_carries_over(monkeypatch, tmp_path: Path) -> None
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_pipe_statuses_recorded(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_pipe_statuses_recorded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """PIPESTATUS surfaces for a multi-stage pipeline."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = ToolExecutionContext(
@@ -118,7 +125,9 @@ async def test_bash_run_pipe_statuses_recorded(monkeypatch, tmp_path: Path) -> N
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_empty_output_explicit(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_empty_output_explicit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A silent success carries the explicit no-output note."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = ToolExecutionContext(
@@ -144,11 +153,11 @@ async def _wait_for_rc(path: Path, *, timeout: float = 8.0) -> int:
     raise AssertionError(f"rc file not written at {path}")
 
 
-async def _wait_for_status(path: Path, *, timeout: float = 8.0) -> dict:
+async def _wait_for_status(path: Path, *, timeout: float = 8.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.is_file():
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
             if data.get("state") in ("done", "killed"):
                 return data
         await asyncio.sleep(0.05)
@@ -157,7 +166,9 @@ async def _wait_for_status(path: Path, *, timeout: float = 8.0) -> dict:
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_background_roundtrip(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_background_roundtrip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Explicit background returns a job_id; the rc file flips when done."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = ToolExecutionContext(
@@ -186,7 +197,9 @@ async def test_bash_run_background_roundtrip(monkeypatch, tmp_path: Path) -> Non
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_auto_background_on_timeout(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_auto_background_on_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A slow unguarded command is moved to background instead of killed."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = ToolExecutionContext(
@@ -210,7 +223,9 @@ async def test_bash_run_auto_background_on_timeout(monkeypatch, tmp_path: Path) 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_sleep_timeout_is_killed(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_sleep_timeout_is_killed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Commands starting with sleep are never auto-backgrounded."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = ToolExecutionContext(
@@ -227,7 +242,7 @@ async def test_bash_run_sleep_timeout_is_killed(monkeypatch, tmp_path: Path) -> 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_batch_parallel(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_batch_parallel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Independent commands run as a batch and keep their own stdout/rc."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     ctx = ToolExecutionContext(
@@ -248,7 +263,9 @@ async def test_bash_run_batch_parallel(monkeypatch, tmp_path: Path) -> None:
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_batch_does_not_carry_env(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_batch_does_not_carry_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Env deltas from a batch are discarded; a later call does not see them."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     batch = ToolExecutionContext(
@@ -272,7 +289,9 @@ async def test_bash_run_batch_does_not_carry_env(monkeypatch, tmp_path: Path) ->
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
-async def test_bash_run_batch_adopts_agreed_cwd(monkeypatch, tmp_path: Path) -> None:
+async def test_bash_run_batch_adopts_agreed_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """When every batch child ends in the same cwd, the session adopts it."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     subdir = tmp_path / "batchcwd"

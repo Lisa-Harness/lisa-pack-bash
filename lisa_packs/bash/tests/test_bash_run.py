@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from kernel.capability_binding import ExecutionFloorView
+from kernel.models import ToolExecutionContext
 from pydantic import ValidationError
 
-from kernel.models import ToolExecutionContext
-
 from lisa_packs.bash import executor as _executor
+from lisa_packs.bash.session import BashSession
 from lisa_packs.bash.tools.bash_run import bash_run
+
+#: Number of children in the two-command batch fixtures.
+_BATCH_CHILD_COUNT = 2
 
 
 def _ctx(
@@ -30,14 +35,16 @@ def _ctx(
 
 
 @pytest.fixture(autouse=True)
-def _fresh_sessions():
+def _fresh_sessions() -> Iterator[None]:
     _executor._reset_for_tests()
     yield
     _executor._reset_for_tests()
 
 
 @pytest.mark.asyncio
-async def test_missing_bash_returns_hard_error(monkeypatch, tmp_path: Path) -> None:
+async def test_missing_bash_returns_hard_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: False)
     result = await bash_run.execute(_ctx(tmp_path))
     assert result.error
@@ -46,11 +53,18 @@ async def test_missing_bash_returns_hard_error(monkeypatch, tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_unsandboxed_reports_sandboxed_false(monkeypatch, tmp_path: Path) -> None:
+async def test_unsandboxed_reports_sandboxed_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
 
-    async def _fake_run_in_session(ctx, session, command, **kwargs):
+    async def _fake_run_in_session(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        command: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         return {
             "stdout": "hi",
             "stderr": "",
@@ -70,13 +84,20 @@ async def test_unsandboxed_reports_sandboxed_false(monkeypatch, tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_sandboxed_composition_threaded(monkeypatch, tmp_path: Path) -> None:
+async def test_sandboxed_composition_threaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
-    async def _fake_run_in_session(ctx, session, command, **kwargs):
+    async def _fake_run_in_session(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        command: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         seen["command"] = command
         seen["kwargs"] = kwargs
         return {
@@ -176,11 +197,16 @@ async def test_commands_json_non_list_string_still_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_backgrounded_short_circuit(monkeypatch, tmp_path: Path) -> None:
+async def test_backgrounded_short_circuit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
 
-    async def _fake_run_in_session(ctx, session, command, **kwargs):
+    async def _fake_run_in_session(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        command: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         return {
             "backgrounded": True,
             "job_id": "jabc123",
@@ -202,11 +228,16 @@ async def test_backgrounded_short_circuit(monkeypatch, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_batch_result_short_circuit(monkeypatch, tmp_path: Path) -> None:
+async def test_batch_result_short_circuit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
 
-    async def _fake_batch(ctx, session, commands, **kwargs):
+    async def _fake_batch(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        commands: list[str],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         return {
             "batch": True,
             "when": "parallel",
@@ -229,18 +260,25 @@ async def test_batch_result_short_circuit(monkeypatch, tmp_path: Path) -> None:
     assert result.error == ""
     assert result.output_json["batch"] is True
     assert result.output_json["when"] == "parallel"
-    assert len(result.output_json["results"]) == 2
+    assert len(result.output_json["results"]) == _BATCH_CHILD_COUNT
 
 
 @pytest.mark.asyncio
-async def test_batch_overlay_downgrades_to_serial(monkeypatch, tmp_path: Path) -> None:
+async def test_batch_overlay_downgrades_to_serial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_degraded", lambda: [])
 
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
-    async def _fake_batch(ctx, session, commands, **kwargs):
+    async def _fake_batch(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        commands: list[str],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         seen["when"] = kwargs.get("when")
         seen["persist"] = kwargs.get("persist")
         return {
@@ -275,7 +313,9 @@ async def test_batch_overlay_downgrades_to_serial(monkeypatch, tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_rc_recovers_truthful_exit_code(monkeypatch, tmp_path: Path) -> None:
+async def test_rc_recovers_truthful_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Regression: failing commands must surface their real exit code.
 
     The rc marker is emitted by the wrapped command (prompts never render
@@ -299,7 +339,9 @@ async def test_rc_recovers_truthful_exit_code(monkeypatch, tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_output_without_trailing_newline_preserved(monkeypatch, tmp_path: Path) -> None:
+async def test_output_without_trailing_newline_preserved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """The rc marker must stay on its own line; final output line survives."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
@@ -313,7 +355,7 @@ async def test_output_without_trailing_newline_preserved(monkeypatch, tmp_path: 
 
 @pytest.mark.asyncio
 async def test_missing_bwrap_binary_sandbox_error_surfaces_missing(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Regression: pack installed but bwrap binary absent must fail loudly.
 
@@ -331,7 +373,12 @@ async def test_missing_bwrap_binary_sandbox_error_surfaces_missing(
         lambda: ["bubblewrap (bwrap) binary not found on PATH"],
     )
 
-    async def _fake_run_in_session(ctx, session, command, **kwargs):
+    async def _fake_run_in_session(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        command: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         return {
             "error": (
                 "sandbox execution failed: bubblewrap sandbox is not available: "
@@ -350,7 +397,9 @@ async def test_missing_bwrap_binary_sandbox_error_surfaces_missing(
 
 
 @pytest.mark.asyncio
-async def test_missing_bwrap_binary_refuses_execution(monkeypatch, tmp_path: Path) -> None:
+async def test_missing_bwrap_binary_refuses_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A registered-but-broken sandbox must not execute or report success."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
@@ -360,7 +409,12 @@ async def test_missing_bwrap_binary_refuses_execution(monkeypatch, tmp_path: Pat
         lambda: ["bubblewrap (bwrap) binary not found on PATH"],
     )
 
-    async def _fake_run_in_session(ctx, session, command, **kwargs):
+    async def _fake_run_in_session(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        command: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         raise AssertionError("a missing sandbox must prevent execution")
 
     monkeypatch.setattr(bash_run, "run_in_session", _fake_run_in_session)
@@ -371,13 +425,20 @@ async def test_missing_bwrap_binary_refuses_execution(monkeypatch, tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_executor_exception_stamps_truthful_sandboxed(monkeypatch, tmp_path: Path) -> None:
+async def test_executor_exception_stamps_truthful_sandboxed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A raised (rather than error-result) sandbox failure stamps sandboxed=True."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_degraded", lambda: [])
 
-    async def _raise_run_in_session(ctx, session, command, **kwargs):
+    async def _raise_run_in_session(
+        ctx: ToolExecutionContext,
+        session: BashSession,
+        command: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         raise RuntimeError("bwrap_run blew up")
 
     monkeypatch.setattr(bash_run, "run_in_session", _raise_run_in_session)

@@ -10,26 +10,28 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from kernel.capability_binding import ExecutionFloorView
-
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash import executor as _executor
+from lisa_packs.bash.session import BashSession
 from lisa_packs.bash.tools.bash_run import bash_run
 
 
 @pytest.fixture(autouse=True)
-def _fresh_sessions():
+def _fresh_sessions() -> Iterator[None]:
     _executor._reset_for_tests()
     yield
     _executor._reset_for_tests()
 
 
 def _ctx(
-    tmp_path: Path, pack_config: dict | None = None, **params
+    tmp_path: Path, pack_config: dict[str, Any] | None = None, **params: Any
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
         tool_id="bash_run",
@@ -45,9 +47,8 @@ def _data_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="lisa-bash-fn-test-"))
 
 
-def _session(policy: dict, data_dir: Path | None = None):
+def _session(policy: dict[str, Any], data_dir: Path | None = None) -> BashSession:
     from lisa_packs.bash.priming import SessionPriming
-    from lisa_packs.bash.session import BashSession
 
     data_dir = data_dir or _data_dir()
     priming = SessionPriming(data_dir=data_dir, session_key="k")
@@ -280,8 +281,7 @@ async def test_bash_run_function_replay_pattern_filtering(tmp_path: Path) -> Non
         workspace_id="ws",
         parameters={
             "command": (
-                "lisa_fn_keep() { echo kept; }; "
-                "lisa_fn_drop() { echo dropped; }; lisa_fn_keep"
+                "lisa_fn_keep() { echo kept; }; lisa_fn_drop() { echo dropped; }; lisa_fn_keep"
             )
         },
         data_dir=str(tmp_path),

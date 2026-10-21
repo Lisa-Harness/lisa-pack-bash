@@ -9,17 +9,28 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
-
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash import executor
 from lisa_packs.bash.tools.bash_run import bash_run
 
+#: Grace window (seconds) the auto-background helper grants past the model's
+#: timeout, and the cap it clamps that window to.
+_AUTO_BG_GRACE_SECONDS = 630
+_AUTO_BG_MIN_TIMEOUT_SECONDS = 601
+_AUTO_BG_TIMEOUT_CAP_SECONDS = 3600
 
-def _ctx(tmp_path: Path, **params) -> ToolExecutionContext:
+#: Extra seconds a guarded (sleep / git) sandboxed command gets over the
+#: model's timeout before the sandbox kills it.
+_GUARDED_SANDBOX_GRACE_SECONDS = 31
+
+
+def _ctx(tmp_path: Path, **params: Any) -> ToolExecutionContext:
     return ToolExecutionContext(
         tool_id="bash_run",
         workspace_id="ws",
@@ -29,7 +40,7 @@ def _ctx(tmp_path: Path, **params) -> ToolExecutionContext:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_sessions():
+def _fresh_sessions() -> Iterator[None]:
     executor._reset_for_tests()
     yield
     executor._reset_for_tests()
@@ -37,13 +48,22 @@ def _fresh_sessions():
 
 @pytest.mark.asyncio
 async def test_sandboxed_staged_layer_result_carries_review_note(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A composed overlay run is stamped STAGED + the layer_review.md pointer."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    async def _staged_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
+    async def _staged_bwrap(
+        ctx: ToolExecutionContext,
+        inner_argv: list[str],
+        *,
+        timeout_seconds: int,
+        overrides: dict[str, Any],
+        persist: bool,
+        layer_id: str,
+        sentinel: str = "",
+    ) -> dict[str, Any]:
         return {
             "return_code": 0,
             "stdout_raw": "done\n",
@@ -59,15 +79,21 @@ async def test_sandboxed_staged_layer_result_carries_review_note(
     monkeypatch.setattr(executor, "_run_via_bwrap", _staged_bwrap)
     monkeypatch.setattr(executor, "is_auto_background_guarded", lambda cmd: True)
     ctx = _ctx(tmp_path, command="echo staged", persist=True)
-    session = executor.resolve_or_create_session_for_tests(sandboxed=True) if hasattr(
-        executor, "resolve_or_create_session_for_tests"
-    ) else None
+    session = (
+        executor.resolve_or_create_session_for_tests(sandboxed=True)
+        if hasattr(executor, "resolve_or_create_session_for_tests")
+        else None
+    )
     # Use the session the tool itself would create: compose via run_in_session.
     from lisa_packs.bash.session import resolve_or_create_session
 
     session = resolve_or_create_session(ctx, sandboxed=True)
     result = await executor.run_in_session(
-        ctx, session, "echo staged", timeout_seconds=10, persist=True,
+        ctx,
+        session,
+        "echo staged",
+        timeout_seconds=10,
+        persist=True,
     )
     assert result.get("error") is None
     assert result["backend"] == "overlay"
@@ -80,7 +106,7 @@ async def test_sandboxed_staged_layer_result_carries_review_note(
 
 @pytest.mark.asyncio
 async def test_sandboxed_slow_command_auto_backgrounds(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A slow sandboxed command becomes a job instead of dying with the turn."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
@@ -88,7 +114,16 @@ async def test_sandboxed_slow_command_auto_backgrounds(
 
     release = asyncio.Event()
 
-    async def _slow_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
+    async def _slow_bwrap(
+        ctx: ToolExecutionContext,
+        inner_argv: list[str],
+        *,
+        timeout_seconds: int,
+        overrides: dict[str, Any],
+        persist: bool,
+        layer_id: str,
+        sentinel: str = "",
+    ) -> dict[str, Any]:
         await asyncio.wait_for(release.wait(), timeout=30)
         return {
             "return_code": 0,
@@ -129,15 +164,24 @@ async def test_sandboxed_slow_command_auto_backgrounds(
 
 @pytest.mark.asyncio
 async def test_sandboxed_git_command_is_killed_not_backgrounded(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Guarded commands (git) get the bounded T+30 timeout, never the grace."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
-    async def _bounded_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
+    async def _bounded_bwrap(
+        ctx: ToolExecutionContext,
+        inner_argv: list[str],
+        *,
+        timeout_seconds: int,
+        overrides: dict[str, Any],
+        persist: bool,
+        layer_id: str,
+        sentinel: str = "",
+    ) -> dict[str, Any]:
         seen["timeout_seconds"] = timeout_seconds
         # Child reports a bwrap-level timeout kill, as the real tool does at T+30.
         return {"return_code": -1, "stdout_raw": "", "stderr": "", "timed_out": True}
@@ -149,18 +193,27 @@ async def test_sandboxed_git_command_is_killed_not_backgrounded(
     assert result.output_json.get("backgrounded") is not True
     assert result.output_json["timed_out"] is True
     # Bounded path: model timeout + 30s, NOT the auto-background grace window.
-    assert seen["timeout_seconds"] == 31
+    assert seen["timeout_seconds"] == _GUARDED_SANDBOX_GRACE_SECONDS
 
 
 @pytest.mark.asyncio
 async def test_sandboxed_fast_command_not_backgrounded(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A fast sandboxed command completes within the wait; no job is created."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    async def _fast_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
+    async def _fast_bwrap(
+        ctx: ToolExecutionContext,
+        inner_argv: list[str],
+        *,
+        timeout_seconds: int,
+        overrides: dict[str, Any],
+        persist: bool,
+        layer_id: str,
+        sentinel: str = "",
+    ) -> dict[str, Any]:
         return {"return_code": 0, "stdout_raw": "quick\n", "stderr": "", "timed_out": False}
 
     monkeypatch.setattr(executor, "_run_via_bwrap", _fast_bwrap)
@@ -172,12 +225,23 @@ async def test_sandboxed_fast_command_not_backgrounded(
 
 
 @pytest.mark.asyncio
-async def test_sandboxed_auto_bg_adopts_error_payload(monkeypatch, tmp_path: Path) -> None:
+async def test_sandboxed_auto_bg_adopts_error_payload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """A sandbox error surfacing after the model timeout still lands as a job."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
 
-    async def _err_bwrap(ctx, inner_argv, *, timeout_seconds, overrides, persist, layer_id, sentinel=""):
+    async def _err_bwrap(
+        ctx: ToolExecutionContext,
+        inner_argv: list[str],
+        *,
+        timeout_seconds: int,
+        overrides: dict[str, Any],
+        persist: bool,
+        layer_id: str,
+        sentinel: str = "",
+    ) -> dict[str, Any]:
         await asyncio.sleep(2)
         return {"error": "boom", "stdout_raw": "", "stderr": "", "timed_out": False}
 
@@ -199,6 +263,6 @@ async def test_sandboxed_auto_bg_adopts_error_payload(monkeypatch, tmp_path: Pat
 
 def test_auto_bg_bwrap_timeout_helper() -> None:
     """Grace window is model timeout + 600s, capped at 3600s."""
-    assert executor._auto_bg_bwrap_timeout(30) == 630
-    assert executor._auto_bg_bwrap_timeout(1) == 601
-    assert executor._auto_bg_bwrap_timeout(4000) == 3600
+    assert executor._auto_bg_bwrap_timeout(30) == _AUTO_BG_GRACE_SECONDS
+    assert executor._auto_bg_bwrap_timeout(1) == _AUTO_BG_MIN_TIMEOUT_SECONDS
+    assert executor._auto_bg_bwrap_timeout(4000) == _AUTO_BG_TIMEOUT_CAP_SECONDS

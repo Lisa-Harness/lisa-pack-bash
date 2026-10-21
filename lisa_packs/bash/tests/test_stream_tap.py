@@ -7,6 +7,7 @@ Covers the ``StreamTap`` line-buffering contract, ``tapped_drain_to_file``
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -15,24 +16,35 @@ from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash.executor import StreamTap, tapped_drain_to_file
 
+#: Upper bound on a single published line. The tap truncates at 2000
+#: characters; the operator view must stay below this ceiling.
+_MAX_PUBLISHED_LINE = 2100
+
 
 class _FakeBus:
     """Minimal bus double recording publishes."""
 
     def __init__(self) -> None:
-        self.published: list[tuple[str, dict]] = []
+        self.published: list[tuple[str, dict[str, Any]]] = []
 
-    async def publish(self, topic: str, payload: dict) -> None:
+    async def publish(self, topic: str, payload: dict[str, Any]) -> None:
         self.published.append((topic, payload))
 
-    def subscribe(self, topic: str, handler) -> None:
+    def subscribe(self, topic: str, handler: Callable[..., Any]) -> None:
         pass
 
 
-def _ctx(**overrides) -> ToolExecutionContext:
-    fields = {"tool_id": "bash_run"}
-    fields.update(overrides)
-    return ToolExecutionContext(**fields)
+def _ctx(
+    *,
+    event_bus: Any = None,
+    stream_output: bool = False,
+) -> ToolExecutionContext:
+    """A minimal context carrying the tap's gating fields."""
+    return ToolExecutionContext(
+        tool_id="bash_run",
+        event_bus=event_bus,
+        stream_output=stream_output,
+    )
 
 
 def _published_texts(bus: _FakeBus) -> list[str]:
@@ -96,7 +108,7 @@ class TestStreamTap:
         tap = StreamTap(ctx, stream="stdout")
         texts = self._drain(tap, [b"x" * 5000 + b"\n"])
         (text,) = texts
-        assert len(text) < 2100
+        assert len(text) < _MAX_PUBLISHED_LINE
         assert text.endswith("…")
 
     def test_multibyte_split_across_chunks(self) -> None:
@@ -203,7 +215,7 @@ class TestTappedDrain:
         tap = StreamTap(ctx, stream="stdout")
         spill = tmp_path / "out.log"
 
-        async def drive() -> dict:
+        async def drive() -> dict[str, Any]:
             class _Reader:
                 def __init__(self, chunks: list[bytes]) -> None:
                     self._chunks = list(chunks)
@@ -225,7 +237,7 @@ class TestTappedDrain:
 
         spill = tmp_path / "out.log"
 
-        async def drive() -> dict:
+        async def drive() -> dict[str, Any]:
             class _Reader:
                 def __init__(self, chunks: list[bytes]) -> None:
                     self._chunks = list(chunks)

@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import importlib
 import json
 import logging
 import shlex
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolExecutionContext
@@ -37,6 +38,31 @@ logger = logging.getLogger(__name__)
 _BASH_BIN = "bash"
 _SESSIONS: dict[str, BashSession] = {}
 
+#: Directories that hold a real POSIX bash, searched when the one on PATH
+#: turns out to be a launcher rather than a shell.
+#:
+#: On Windows, ``C:\Windows\System32\bash.exe`` is the WSL launcher: it
+#: accepts no ``-c`` argument, so the pack's command composition cannot
+#: drive it, and it reports a distribution error instead of running
+#: anything. Git for Windows ships a real bash at ``<git>/bin/bash.exe``
+#: and ``<git>/usr/bin/bash.exe``, which is the one the pack needs.
+_POSIX_BASH_GLOBS: tuple[str, ...] = (
+    "/usr/bin/bash",
+    "/bin/bash",
+    "/usr/local/bin/bash",
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+#: Markers of a bash that is a launcher rather than a shell. The WSL
+#: launcher lives in the system directory on Windows and prints a
+#: distribution error rather than running the command it is given.
+_LAUNCHER_MARKERS: tuple[str, ...] = (
+    "system32",
+    "syswow64",
+)
+
 # Commands composed through bwrap get these forwarded flags by default.
 _DEFAULT_BWRAP_TIMEOUT = 120
 
@@ -51,9 +77,42 @@ SANDBOX_FACTS_DIRNAME = "sandbox-facts.json"
 _RUN_DIR_NAME = "run"
 
 
+def _is_launcher(path: str) -> bool:
+    """True when ``path`` looks like a launcher rather than a real shell.
+
+    The Windows WSL launcher lives in the system directory. It accepts no
+    ``-c`` argument, so the pack cannot drive it, and it answers with a
+    distribution error instead of running anything.
+    """
+    lowered = path.lower().replace("/", "\\")
+    return any(marker in lowered for marker in _LAUNCHER_MARKERS)
+
+
+def resolve_bash() -> str | None:
+    """Return the path of a bash the pack can actually drive, or None.
+
+    A launcher on PATH is not usable: it takes no ``-c`` argument, so the
+    pack's composed command never runs and the output is a launcher error
+    message rather than the command's own. When PATH resolves to such a
+    launcher, the well-known locations of a real POSIX bash are searched
+    instead — Git for Windows ships one.
+    """
+    on_path = shutil.which(_BASH_BIN)
+    if on_path is not None and not _is_launcher(on_path):
+        return on_path
+    for candidate in _POSIX_BASH_GLOBS:
+        if Path(candidate).is_file():
+            return candidate
+    return on_path
+
+
 def bash_available() -> bool:
-    """Return True when a bash binary is on PATH."""
-    return shutil.which(_BASH_BIN) is not None
+    """Return True when a usable bash binary is available.
+
+    A bash that is only a launcher does not count: the pack composes
+    ``bash -c <command>``, and a launcher does not accept that.
+    """
+    return resolve_bash() is not None
 
 
 #: Default state-carryover policy: cwd and env always carry. Function-body
@@ -110,7 +169,7 @@ def _session_state_policy(ctx: ToolExecutionContext) -> dict[str, Any]:
     return policy
 
 
-class SessionResult(dict):
+class SessionResult(dict[str, Any]):
     """Structured per-command result (a dict to keep ToolResult json simple)."""
 
 
@@ -144,7 +203,7 @@ def _floor_requires_sandbox(ctx: ToolExecutionContext) -> bool:
     return floor is None or floor.execution != "bare"
 
 
-class SandboxRequiredButUnavailable(RuntimeError):  # noqa: N818 - not a tool error
+class SandboxRequiredButUnavailable(RuntimeError):
     """The floor mandates sandboxed execution but the bwrap pack cannot run."""
 
     def __init__(self, reasons: list[str]) -> None:
@@ -159,6 +218,18 @@ class SandboxRequiredButUnavailable(RuntimeError):  # noqa: N818 - not a tool er
         )
 
 
+class _BwrapCapabilities(Protocol):
+    """Structural view of the bwrap pack's capability report."""
+
+    missing: Sequence[str]
+
+
+class _BwrapProbeModule(Protocol):
+    """Structural view of ``lisa_packs.bwrap.probe``'s public surface."""
+
+    detect_capabilities: Callable[..., _BwrapCapabilities]
+
+
 def _sandbox_degraded() -> list[str]:
     """Report sandbox gaps when the pack is registered but the host cannot run it.
 
@@ -170,10 +241,11 @@ def _sandbox_degraded() -> list[str]:
     if not _sandbox_available():
         return []
     try:
-        from lisa_packs.bwrap.probe import detect_capabilities
+        module = importlib.import_module("lisa_packs.bwrap.probe")
     except ImportError:  # pragma: no cover - bwrap pack always present when registered
         return ["bubblewrap capability probe is unavailable"]
-    return list(detect_capabilities().missing)
+    probe = cast(_BwrapProbeModule, module)
+    return list(probe.detect_capabilities().missing)
 
 
 class BashSession:
@@ -197,16 +269,14 @@ class BashSession:
         self._rc: object | None = None
         # Job registry: backgrounded commands tracked by id. Values are
         # host-side asyncio.Tasks; artifacts live under jobs_dir.
-        self.jobs: dict[str, asyncio.Task] = {}
+        self.jobs: dict[str, asyncio.Task[Any]] = {}
         # Baseline: what the rc already exports/defines before the model ever
         # runs anything. Carryover deltas are computed against these so the
         # rc's own exports (LANG, TERM, NO_COLOR…) and functions aren't
         # treated as state to replay.
         self._base_env: frozenset[str] = initial_env or frozenset()
         self._base_funcs: frozenset[str] = initial_funcs or frozenset()
-        self._state_policy: dict[str, Any] = dict(
-            _DEFAULT_SESSION_STATE, **(state_policy or {})
-        )
+        self._state_policy: dict[str, Any] = dict(_DEFAULT_SESSION_STATE, **(state_policy or {}))
 
     @property
     def jobs_dir(self) -> Path:
@@ -281,7 +351,7 @@ class BashSession:
             base.with_suffix(".status.json"),
         )
 
-    def register_job(self, job_id: str, task: "asyncio.Task[Any]") -> None:
+    def register_job(self, job_id: str, task: asyncio.Task[Any]) -> None:
         """Add a running background job and persist a ``running`` status file."""
         self.jobs[job_id] = task
         log_path, rc_path, status_path = self.job_artifacts(job_id)
@@ -332,16 +402,10 @@ class BashSession:
             return
         path = self.priming.state_path
         try:
-            existing = (
-                path.read_text(encoding="utf-8")
-                if path.is_file()
-                else _STATE_HEADER + "\n"
-            )
+            existing = path.read_text(encoding="utf-8") if path.is_file() else _STATE_HEADER + "\n"
             lines = existing.splitlines()
             split_at = (
-                lines.index(_FUNCTIONS_SECTION)
-                if _FUNCTIONS_SECTION in lines
-                else len(lines)
+                lines.index(_FUNCTIONS_SECTION) if _FUNCTIONS_SECTION in lines else len(lines)
             )
             head = [ln for ln in lines[:split_at] if not ln.startswith("cd ")]
             if not head:
@@ -428,7 +492,7 @@ class BashSession:
             'exit "$__lisa_rc"'
         )
         return [
-            _BASH_BIN,
+            resolve_bash() or _BASH_BIN,
             "--noprofile",
             "-c",
             wrapped,
@@ -471,7 +535,10 @@ def _floor_posture_payload(floor: ExecutionFloorView | None) -> dict[str, Any]:
         out["execution"] = floor.execution
     persistence = floor.persistence
     if isinstance(persistence, str) and persistence in (
-        "direct-write", "overlay", "ephemeral", "readonly",
+        "direct-write",
+        "overlay",
+        "ephemeral",
+        "readonly",
     ):
         out["persistence"] = persistence
     captured = sorted(str(path) for path, access in floor.paths.items() if access == "capture")
@@ -480,9 +547,7 @@ def _floor_posture_payload(floor: ExecutionFloorView | None) -> dict[str, Any]:
     return out
 
 
-def _write_containment_fact(
-    session: BashSession, ctx: ToolExecutionContext | None = None
-) -> None:
+def _write_containment_fact(session: BashSession, ctx: ToolExecutionContext | None = None) -> None:
     """Publish this session's containment fact for the host approval engine.
 
     Writes ``<data_dir>/sandbox-facts/<session_key>.json`` atomically so the
@@ -498,7 +563,7 @@ def _write_containment_fact(
     stale ``contained`` fact.
     """
     state, reasons = _containment_current(ctx)
-    payload = {
+    payload: dict[str, Any] = {
         "tool_id": "bash_run",
         "containment": state,
         "reasons": reasons,
@@ -513,7 +578,7 @@ def _write_containment_fact(
         posture = _floor_posture_payload(_bwrap_floor(ctx)) if ctx is not None else {}
         if posture:
             payload["floor_posture"] = posture
-    except Exception:  # noqa: BLE001 - the fact must never fail to publish
+    except Exception:  # pylint: disable=broad-except  # the fact must never fail to publish
         pass
     path = session.data_dir / _RUN_DIR_NAME / session.session_key / SANDBOX_FACTS_DIRNAME
     try:
@@ -542,7 +607,7 @@ def _baseline_snapshot(rc_content: str) -> tuple[frozenset[str], frozenset[str]]
         import subprocess
 
         result = subprocess.run(
-            [_BASH_BIN, "--noprofile", "-c", probe],
+            [resolve_bash() or _BASH_BIN, "--noprofile", "-c", probe],
             capture_output=True,
             text=True,
             check=False,
