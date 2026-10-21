@@ -45,7 +45,7 @@ jobs:
       # distribution, so the pack is installed into the framework
       # environment as well.
       - name: Install the pack
-        run: uv pip install --python .venv -e .
+        run: uv pip install --python .venv -e ..
         working-directory: lisa
 
       # ruff and mypy resolve their configuration from the working
