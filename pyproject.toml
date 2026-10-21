@@ -18,7 +18,7 @@ include = ["lisa_packs*", "lisa_packs.bash*"]
 
 [project]
 name = "lisa-pack-bash"
-version = "0.1.0"
+version = "0.1.1"
 description = "Shell execution capability for Lisa - persistent, agent-optimized bash session"
 requires-python = ">=3.11"
 dependencies = ["lisa-harness-kernel", "lisa-harness-sdk"]
