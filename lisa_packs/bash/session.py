@@ -38,6 +38,31 @@ logger = logging.getLogger(__name__)
 _BASH_BIN = "bash"
 _SESSIONS: dict[str, BashSession] = {}
 
+#: Directories that hold a real POSIX bash, searched when the one on PATH
+#: turns out to be a launcher rather than a shell.
+#:
+#: On Windows, ``C:\Windows\System32\bash.exe`` is the WSL launcher: it
+#: accepts no ``-c`` argument, so the pack's command composition cannot
+#: drive it, and it reports a distribution error instead of running
+#: anything. Git for Windows ships a real bash at ``<git>/bin/bash.exe``
+#: and ``<git>/usr/bin/bash.exe``, which is the one the pack needs.
+_POSIX_BASH_GLOBS: tuple[str, ...] = (
+    "/usr/bin/bash",
+    "/bin/bash",
+    "/usr/local/bin/bash",
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+#: Markers of a bash that is a launcher rather than a shell. The WSL
+#: launcher lives in the system directory on Windows and prints a
+#: distribution error rather than running the command it is given.
+_LAUNCHER_MARKERS: tuple[str, ...] = (
+    "system32",
+    "syswow64",
+)
+
 # Commands composed through bwrap get these forwarded flags by default.
 _DEFAULT_BWRAP_TIMEOUT = 120
 
@@ -52,9 +77,42 @@ SANDBOX_FACTS_DIRNAME = "sandbox-facts.json"
 _RUN_DIR_NAME = "run"
 
 
+def _is_launcher(path: str) -> bool:
+    """True when ``path`` looks like a launcher rather than a real shell.
+
+    The Windows WSL launcher lives in the system directory. It accepts no
+    ``-c`` argument, so the pack cannot drive it, and it answers with a
+    distribution error instead of running anything.
+    """
+    lowered = path.lower().replace("/", "\\")
+    return any(marker in lowered for marker in _LAUNCHER_MARKERS)
+
+
+def resolve_bash() -> str | None:
+    """Return the path of a bash the pack can actually drive, or None.
+
+    A launcher on PATH is not usable: it takes no ``-c`` argument, so the
+    pack's composed command never runs and the output is a launcher error
+    message rather than the command's own. When PATH resolves to such a
+    launcher, the well-known locations of a real POSIX bash are searched
+    instead — Git for Windows ships one.
+    """
+    on_path = shutil.which(_BASH_BIN)
+    if on_path is not None and not _is_launcher(on_path):
+        return on_path
+    for candidate in _POSIX_BASH_GLOBS:
+        if Path(candidate).is_file():
+            return candidate
+    return on_path
+
+
 def bash_available() -> bool:
-    """Return True when a bash binary is on PATH."""
-    return shutil.which(_BASH_BIN) is not None
+    """Return True when a usable bash binary is available.
+
+    A bash that is only a launcher does not count: the pack composes
+    ``bash -c <command>``, and a launcher does not accept that.
+    """
+    return resolve_bash() is not None
 
 
 #: Default state-carryover policy: cwd and env always carry. Function-body
@@ -434,7 +492,7 @@ class BashSession:
             'exit "$__lisa_rc"'
         )
         return [
-            _BASH_BIN,
+            resolve_bash() or _BASH_BIN,
             "--noprofile",
             "-c",
             wrapped,
@@ -549,7 +607,7 @@ def _baseline_snapshot(rc_content: str) -> tuple[frozenset[str], frozenset[str]]
         import subprocess
 
         result = subprocess.run(
-            [_BASH_BIN, "--noprofile", "-c", probe],
+            [resolve_bash() or _BASH_BIN, "--noprofile", "-c", probe],
             capture_output=True,
             text=True,
             check=False,
