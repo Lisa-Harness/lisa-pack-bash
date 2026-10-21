@@ -24,6 +24,7 @@ from typing import Any
 from kernel.models import ToolExecutionContext
 from kernel.tools.output_stream import TOOL_OUTPUT_TOPIC, publish_tool_output
 
+from lisa_packs.bash._decode import StreamDecoder, decode_bytes
 from lisa_packs.bash.session import BashSession
 
 __all__ = [
@@ -114,7 +115,15 @@ class StreamTap:
     reads the full raw output for the model).
     """
 
-    __slots__ = ("_buffer", "_ctx", "_max_line", "_sentinel", "_seq", "_stream")
+    __slots__ = (
+        "_buffer",
+        "_ctx",
+        "_decoder",
+        "_max_line",
+        "_sentinel",
+        "_seq",
+        "_stream",
+    )
 
     def __init__(
         self,
@@ -126,6 +135,7 @@ class StreamTap:
         self._ctx = ctx
         self._stream = stream
         self._buffer = ""
+        self._decoder = StreamDecoder()
         self._seq = 0
         # A pathological single line (e.g. base64 dump) is truncated for the
         # operator view; the full text still reaches the model via ToolResult.
@@ -155,8 +165,7 @@ class StreamTap:
         """Split ``chunk`` into lines and publish each complete one."""
         if not chunk:
             return
-        text = chunk.decode("utf-8", errors="replace")
-        self._buffer += text
+        self._buffer += self._decoder.decode(chunk)
         while "\n" in self._buffer:
             line, _, rest = self._buffer.partition("\n")
             self._buffer = rest
@@ -164,6 +173,7 @@ class StreamTap:
 
     def close(self) -> None:
         """Flush the trailing partial line (if any) on stream end."""
+        self._buffer += self._decoder.flush()
         if self._buffer:
             self._publish(self._buffer)
             self._buffer = ""
@@ -221,7 +231,7 @@ async def drain_to_file(
     if total > inline_limit:
         overflowed = True
     return {
-        "inline": inline.decode("utf-8", errors="replace"),
+        "inline": decode_bytes(bytes(inline)),
         "output_path": str(spill_path),
         "output_bytes": total,
         "truncated": overflowed or len(inline) >= inline_limit,
@@ -262,7 +272,7 @@ async def tapped_drain_to_file(
     if total > inline_limit:
         overflowed = True
     return {
-        "inline": inline.decode("utf-8", errors="replace"),
+        "inline": decode_bytes(bytes(inline)),
         "output_path": str(spill_path),
         "output_bytes": total,
         "truncated": overflowed or len(inline) >= inline_limit,
