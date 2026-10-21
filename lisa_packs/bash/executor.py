@@ -24,7 +24,7 @@ from typing import Any
 from kernel.models import ToolExecutionContext
 from kernel.tools.output_stream import TOOL_OUTPUT_TOPIC, publish_tool_output
 
-from lisa_packs.bash._decode import StreamDecoder, decode_bytes
+from lisa_packs.bash.encoding import StreamDecoder, decode_bytes
 from lisa_packs.bash.session import BashSession
 
 __all__ = [
