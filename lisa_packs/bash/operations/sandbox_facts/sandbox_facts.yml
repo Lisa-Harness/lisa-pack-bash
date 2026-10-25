@@ -3,7 +3,7 @@ description: "Resolve the bash session and publish its sandbox containment fact 
 pack_id: lisa-pack-bash
 effect: read
 approval_required: false
-mode_allowlist: [shell]
+mode_allowlist: [shell, probe]
 timeout_seconds: 10
 max_calls_per_turn: 0
 exportable: false

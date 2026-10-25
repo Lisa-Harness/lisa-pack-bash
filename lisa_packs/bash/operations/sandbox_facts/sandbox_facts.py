@@ -1,6 +1,6 @@
-"""Sandbox-facts prewarm operation (shell mode pre-turn).
+"""Sandbox-facts prewarm operation (shell and probe mode pre-turn).
 
-Runs before every shell-mode model call (bound via the mode's
+Runs before every shell- and probe-mode model call (bound via the mode's
 ``pre_turn_operation_ids``). It resolves — creating if needed — the bash session
 for this context identity, which both primes the session and publishes the
 per-session sandbox containment fact to ``<data_dir>/run/<session_key>/sandbox-facts.json``.

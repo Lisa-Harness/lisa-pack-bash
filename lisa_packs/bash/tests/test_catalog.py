@@ -52,6 +52,34 @@ def test_shell_mode_still_routable() -> None:
     assert "sandbox_facts" in mode["pre_turn_operation_ids"]
 
 
+def test_probe_mode_delegate_only_contract() -> None:
+    """Probe is a bounded read-only diagnostician, reachable only via delegate.
+
+    The 2026-10-25 runaway: a stuck coding_execute turn read-looped to the
+    nudge, delegated the gathering to a full shell child, and the child burned
+    19 bash calls over 14 minutes to the wall-budget kill — the parent then
+    died of StreamIdleTimeout. Probe replaces that escape hatch: never
+    routable (an operator's "fix my machine" query must land in shell, not a
+    read-only mode), bash_run only, posture pre-warmed, small completions.
+    """
+    roots = resolve_mode_roots([get_content_root()])
+    assert roots, "No modes/ directory found in bash pack"
+    catalog = json.loads(build_mode_catalog_json(roots))
+    assert "probe" in catalog
+    mode = catalog["probe"]
+    assert mode["routable"] is False
+    # No command pattern: a delegate-only mode has no user-facing entry.
+    assert not mode["command_pattern"]
+    assert mode["allowed_tool_ids"] == ["bash_run"]
+    assert mode["pre_turn_operation_ids"] == ["sandbox_facts"]
+    # The contract prose is the enforcement surface for read-only behavior:
+    # it must name the read-only rule and the call budget. Whitespace is
+    # normalized because the authored Markdown hard-wraps lines.
+    body = " ".join(mode["instruction_body"].split())
+    assert "Read-only, always" in body
+    assert "at most 8 bash calls" in body
+
+
 def _declared_timeout_ceiling(tool_id: str) -> int:
     """Read the kernel wrapper timeout declared for ``tool_id``."""
     catalog = json.loads(build_tool_catalog_json(resolve_tool_roots([get_content_root()])))
