@@ -28,6 +28,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-mock>=3.14.0",
+    "lisa-harness-packstest",
 ]
 
 [tool.pytest.ini_options]
@@ -35,6 +36,7 @@ pythonpath = ["."]
 testpaths = ["lisa_packs/bash/tests"]
 markers = [
     "live: runs a real bash session and exercises sandbox composition",
+    "eval: deterministic agent regression evals (no model calls, no I/O)",
 ]
 
 [project.entry-points."lisa.extensions.content_roots"]
