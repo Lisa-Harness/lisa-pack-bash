@@ -55,3 +55,14 @@ def test_session_priming_writes_rc_and_log_dirs(tmp_path: Path) -> None:
     body = rendered.path.read_text(encoding="utf-8")
     assert priming.sentinel in body
     assert str(priming.log_path) in body
+
+
+def test_session_priming_uses_the_shell_dir(tmp_path: Path) -> None:
+    """The rc + state file live under run/<key>/shell/.
+
+    The directory was renamed from ``profile/`` so it no longer collides
+    with the data-dir profiles tree (``<data-dir>/profiles/<name>``).
+    """
+    priming = SessionPriming(data_dir=tmp_path, session_key="abc123")
+    assert priming.rc_path.parent == tmp_path / "run" / "abc123" / "shell"
+    assert priming.state_path.parent == tmp_path / "run" / "abc123" / "shell"

@@ -73,7 +73,7 @@ SANDBOX_FACTS_DIRNAME = "sandbox-facts.json"
 
 #: Per-session execution state lives under ``<data_dir>/run/<session_key>/``
 #: (the sdk.layout RUN category) — one gc-able tree per session holding job
-#: artifacts, scratch, profile files, session logs, and the containment fact.
+#: artifacts, scratch, shell files, session logs, and the containment fact.
 _RUN_DIR_NAME = "run"
 
 

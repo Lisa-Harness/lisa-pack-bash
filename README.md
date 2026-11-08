@@ -109,7 +109,7 @@ section marker; `apply_cwd` never edits at or below it).
 
 ### Priming (the rc)
 
-Per session, `priming.py` renders `content/profile/lisa.rc.tmpl` with a unique
+Per session, `priming.py` renders `content/shell/lisa.rc.tmpl` with a unique
 sentinel + log/state paths, then `session.py` builds an inner argv that
 sources the rc explicitly (`bash -c` ignores `--rcfile`). The rc:
 

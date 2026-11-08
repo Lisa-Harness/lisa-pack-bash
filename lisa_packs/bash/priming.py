@@ -1,6 +1,6 @@
 """Render the agent-optimized bash rc for one Lisa session.
 
-The rc is an authored template under ``content/profile/lisa.rc.tmpl``
+The rc is an authored template under ``content/shell/lisa.rc.tmpl``
 (pack-content rule: no embedded markdown/shell prose in .py). We substitute a
 unique sentinel, the per-session log path, and the state-file path, then write
 it under the host data dir for the session launcher to source. The state file
@@ -18,7 +18,7 @@ from lisa_packs.bash import get_content_root
 
 __all__ = ["RenderedRc", "SessionPriming", "render_rc"]
 
-_TEMPLATE_RELATIVE = Path("content") / "profile" / "lisa.rc.tmpl"
+_TEMPLATE_RELATIVE = Path("content") / "shell" / "lisa.rc.tmpl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,8 +64,8 @@ class SessionPriming:
         self.sentinel = new_sentinel()
         run_dir = data_dir / "run" / session_key
         self.log_path = run_dir / f"bash-{session_key}.log"
-        self.rc_path = run_dir / "profile" / f"rc-{session_key}"
-        self.state_path = run_dir / "profile" / f"state-{session_key}.sh"
+        self.rc_path = run_dir / "shell" / f"rc-{session_key}"
+        self.state_path = run_dir / "shell" / f"state-{session_key}.sh"
 
     def render(self) -> RenderedRc:
         """Write the rendered rc to disk and return its handle."""
