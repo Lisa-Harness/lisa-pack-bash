@@ -13,6 +13,9 @@ resources:
       - lisa-pack-bwrap
       - lisa-pack-markdown
       - lisa-pack-personas
+providers:
+  tools:
+    web_search: e2etest-offline
 routing: { from: { pack: lisa-pack-core, session: default } }
 execution:
   max_session_tokens: 1000000
