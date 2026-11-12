@@ -34,9 +34,7 @@ _OBSERVERS = frozenset(
         "stat", "tail", "tree", "type", "uname", "wc", "which", "whoami",
     }
 )  # fmt: skip
-_GIT_OBSERVERS = frozenset(
-    {"blame", "diff", "log", "ls-files", "rev-parse", "show", "status"}
-)
+_GIT_OBSERVERS = frozenset({"blame", "diff", "log", "ls-files", "rev-parse", "show", "status"})
 #: Predicates that make ``find`` write files or run programs (``-fprint`` covers
 #: ``-fprint0``/``-fprintf``).
 _FIND_WRITERS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls")
@@ -57,7 +55,7 @@ class _Writers:
     def hit(self, arg: str) -> bool:
         if arg.startswith("--"):
             name = arg.split("=", 1)[0]
-            return len(name) > 2 and any(w.startswith(name) for w in self.long)
+            return name != "--" and any(w.startswith(name) for w in self.long)
         return arg.startswith("-") and any(c in self.short for c in arg[1:])
 
 
@@ -111,9 +109,7 @@ def history_keys(params: dict[str, Any], result: ToolResult) -> dict[str, Any] |
         # The job descriptor stays resident; a job that may write still stales
         # what the observations saw.
         command = str(params.get("command") or "")
-        return (
-            None if observation_key(command) else {"invalidates": [OBSERVATION_PREFIX]}
-        )
+        return None if observation_key(command) else {"invalidates": [OBSERVATION_PREFIX]}
     commands = params.get("commands")
     if commands is not None:
         observing = all(observation_key(str(c)) for c in commands)

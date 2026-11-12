@@ -1,8 +1,9 @@
 """Scripted model for history_fold.scenario.yml (see e2etest.scripted).
 
-``cd`` into the workspace named by the session context, ``ls -a`` twice (the rerun supersedes the first), ``cat notes.txt``,
-``touch marker.txt`` (invalidates every resident observation and folds at
-turn end), ``ls -a`` once more, then a text answer.
+``cd`` into the workspace named by the session context, ``ls -a`` twice
+(the rerun supersedes the first), ``cat notes.txt``, ``touch marker.txt``
+(invalidates every resident observation and folds at turn end), ``ls -a``
+once more, then a text answer.
 """
 
 from __future__ import annotations

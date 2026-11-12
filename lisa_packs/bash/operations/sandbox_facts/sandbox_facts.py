@@ -29,6 +29,7 @@ from kernel.models import (
     OperationResult,
     ToolExecutionContext,
 )
+
 from lisa_packs.bash.session import SANDBOX_FACTS_DIRNAME, resolve_or_create_session
 
 __all__ = ["execute"]

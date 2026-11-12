@@ -15,12 +15,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.bash import executor as _executor
 from lisa_packs.bash.tools.bash_run import bash_run
 
 pytestmark = pytest.mark.live
+
+
+def _bare_ctx(**kwargs: Any) -> ToolExecutionContext:
+    """Context whose harness floor deliberately permits bare host execution."""
+    return ToolExecutionContext(
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(execution="bare"),
+        **kwargs,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +45,7 @@ async def test_bash_run_roundtrip_unsandboxed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    ctx = ToolExecutionContext(
+    ctx = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "echo roundtrip-$((40+2))"},
@@ -59,7 +68,7 @@ async def test_bash_run_cwd_carries_over(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     subdir = tmp_path / "workdir"
     subdir.mkdir()
-    first = ToolExecutionContext(
+    first = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": f"cd '{subdir}'"},
@@ -67,7 +76,7 @@ async def test_bash_run_cwd_carries_over(monkeypatch: pytest.MonkeyPatch, tmp_pa
     )
     r1 = await bash_run.execute(first)
     assert r1.error == ""
-    second = ToolExecutionContext(
+    second = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "pwd"},
@@ -80,12 +89,66 @@ async def test_bash_run_cwd_carries_over(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.asyncio
+async def test_bash_run_cwd_with_spaces_carries_over(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cwd needing shell quoting is restored verbatim, not double-escaped."""
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
+    subdir = tmp_path / "work dir's"
+    subdir.mkdir()
+    first = _bare_ctx(
+        tool_id="bash_run",
+        workspace_id="ws",
+        parameters={"command": f'cd "{subdir}"'},
+        data_dir=str(tmp_path),
+    )
+    r1 = await bash_run.execute(first)
+    assert r1.error == ""
+    second = _bare_ctx(
+        tool_id="bash_run",
+        workspace_id="ws",
+        parameters={"command": "pwd"},
+        data_dir=str(tmp_path),
+    )
+    r2 = await bash_run.execute(second)
+    assert r2.error == ""
+    assert r2.output_text.strip().splitlines()[-1] == str(subdir)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.asyncio
+async def test_bash_run_export_with_special_chars_carries_over(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exported values needing %q escaping round-trip without stray backslashes."""
+    monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
+    first = _bare_ctx(
+        tool_id="bash_run",
+        workspace_id="ws",
+        parameters={"command": "export LISA_CARRY_TEST=$'it\\'s a $tab\\there'"},
+        data_dir=str(tmp_path),
+    )
+    r1 = await bash_run.execute(first)
+    assert r1.error == ""
+    second = _bare_ctx(
+        tool_id="bash_run",
+        workspace_id="ws",
+        parameters={"command": 'printf "[%s]\\n" "$LISA_CARRY_TEST"'},
+        data_dir=str(tmp_path),
+    )
+    r2 = await bash_run.execute(second)
+    assert r2.error == ""
+    assert "[it's a $tab\there]" in r2.output_text
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.asyncio
 async def test_bash_run_export_carries_over(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """An exported var from one call reaches the next."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    first = ToolExecutionContext(
+    first = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "export LISA_CARRY_TEST=from_first_call"},
@@ -93,7 +156,7 @@ async def test_bash_run_export_carries_over(
     )
     r1 = await bash_run.execute(first)
     assert r1.error == ""
-    second = ToolExecutionContext(
+    second = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": 'echo "val=$LISA_CARRY_TEST"'},
@@ -111,7 +174,7 @@ async def test_bash_run_pipe_statuses_recorded(
 ) -> None:
     """PIPESTATUS surfaces for a multi-stage pipeline."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    ctx = ToolExecutionContext(
+    ctx = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "false | cat | true"},
@@ -130,7 +193,7 @@ async def test_bash_run_empty_output_explicit(
 ) -> None:
     """A silent success carries the explicit no-output note."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    ctx = ToolExecutionContext(
+    ctx = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "true"},
@@ -171,7 +234,7 @@ async def test_bash_run_background_roundtrip(
 ) -> None:
     """Explicit background returns a job_id; the rc file flips when done."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    ctx = ToolExecutionContext(
+    ctx = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={
@@ -202,7 +265,7 @@ async def test_bash_run_auto_background_on_timeout(
 ) -> None:
     """A slow unguarded command is moved to background instead of killed."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    ctx = ToolExecutionContext(
+    ctx = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={
@@ -228,7 +291,7 @@ async def test_bash_run_sleep_timeout_is_killed(
 ) -> None:
     """Commands starting with sleep are never auto-backgrounded."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    ctx = ToolExecutionContext(
+    ctx = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "sleep 5", "timeout_seconds": 1},
@@ -245,7 +308,7 @@ async def test_bash_run_sleep_timeout_is_killed(
 async def test_bash_run_batch_parallel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Independent commands run as a batch and keep their own stdout/rc."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    ctx = ToolExecutionContext(
+    ctx = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"commands": ["echo alpha-batch", "echo beta-batch"]},
@@ -268,7 +331,7 @@ async def test_bash_run_batch_does_not_carry_env(
 ) -> None:
     """Env deltas from a batch are discarded; a later call does not see them."""
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
-    batch = ToolExecutionContext(
+    batch = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"commands": ["export LISA_BATCH_ENV=nope"]},
@@ -276,7 +339,7 @@ async def test_bash_run_batch_does_not_carry_env(
     )
     r1 = await bash_run.execute(batch)
     assert r1.error == ""
-    follow = ToolExecutionContext(
+    follow = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "echo val=${LISA_BATCH_ENV-unset}"},
@@ -296,7 +359,7 @@ async def test_bash_run_batch_adopts_agreed_cwd(
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: False)
     subdir = tmp_path / "batchcwd"
     subdir.mkdir()
-    batch = ToolExecutionContext(
+    batch = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"commands": [f"cd '{subdir}'", f"cd '{subdir}'"]},
@@ -304,7 +367,7 @@ async def test_bash_run_batch_adopts_agreed_cwd(
     )
     r1 = await bash_run.execute(batch)
     assert r1.error == ""
-    follow = ToolExecutionContext(
+    follow = _bare_ctx(
         tool_id="bash_run",
         workspace_id="ws",
         parameters={"command": "pwd"},

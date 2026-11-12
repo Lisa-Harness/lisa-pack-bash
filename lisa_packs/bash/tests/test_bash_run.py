@@ -269,7 +269,7 @@ async def test_batch_overlay_downgrades_to_serial(
 ) -> None:
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
-    monkeypatch.setattr(bash_run, "_sandbox_degraded", lambda: [])
+    monkeypatch.setattr(bash_run, "_sandbox_degraded", list)
 
     seen: dict[str, Any] = {}
 
@@ -431,7 +431,7 @@ async def test_executor_exception_stamps_truthful_sandboxed(
     """A raised (rather than error-result) sandbox failure stamps sandboxed=True."""
     monkeypatch.setattr(bash_run, "bash_available", lambda: True)
     monkeypatch.setattr(bash_run, "_sandbox_available", lambda: True)
-    monkeypatch.setattr(bash_run, "_sandbox_degraded", lambda: [])
+    monkeypatch.setattr(bash_run, "_sandbox_degraded", list)
 
     async def _raise_run_in_session(
         ctx: ToolExecutionContext,

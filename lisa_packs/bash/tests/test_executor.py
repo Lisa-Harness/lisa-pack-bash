@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import shutil
+import subprocess
 
 import pytest
 from kernel.models import ToolExecutionContext, ToolResult
@@ -233,3 +235,52 @@ def test_floor_posture_payload_extracts_axes() -> None:
     assert _floor_posture_payload(None) == {}
     # Aliased persistence ('direct') is NOT the bwrap token set: excluded.
     assert "persistence" not in _floor_posture_payload(ExecutionFloorView(persistence="direct"))
+
+
+_PRINTF_Q_SAMPLES = [
+    "/x/work dir",
+    "it's",
+    "",
+    'a"b',
+    "tab\there",
+    "nl\nx",
+    "ünï cødé",
+    "~home",
+    "a$b`c",
+    "\x01ctl",
+    "back\\slash",
+    "trail ",
+    " lead",
+]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("value", _PRINTF_Q_SAMPLES)
+def test_unquote_printf_q_inverts_real_bash(value: str) -> None:
+    """Every form bash's ``printf %q`` emits survives the marker scanners."""
+    quoted = subprocess.run(
+        ["bash", "-c", 'printf "%q" "$1"', "_", value],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert executor._unquote_printf_q(quoted) == value
+    sentinel = "__S__ "
+    raw = f"{sentinel}state=cwd={quoted}\n{sentinel}var V={quoted}\n{sentinel}rc=0 pipe=0\n"
+    parsed = executor._parse_output(raw, sentinel)
+    # An empty cwd is never a real directory, so it is not carried over.
+    assert parsed.state.get("cwd", "") == value
+    assert parsed.state["exported"] == {"V": value}
+
+
+def test_parse_output_unquotes_cwd_and_exports() -> None:
+    sentinel = "__S__ "
+    raw = (
+        f"{sentinel}state=cwd=/x/work\\ dir\n"
+        f"{sentinel}var PLAIN=a\\ b\n"
+        f"{sentinel}var CTL=$'x\\ty'\n"
+        f"{sentinel}rc=0 pipe=0\n"
+    )
+    parsed = executor._parse_output(raw, sentinel)
+    assert parsed.state["cwd"] == "/x/work dir"
+    assert parsed.state["exported"] == {"PLAIN": "a b", "CTL": "x\ty"}

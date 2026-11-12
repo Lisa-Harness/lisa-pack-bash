@@ -23,6 +23,13 @@ All notable changes to the Lisa bash pack are documented here.
 
 ### Fixed
 
+- A `cd` or `export` whose value needs quoting (spaces, quotes, tabs,
+  newlines, control bytes) now carries over between calls. The wrapper's
+  `printf %q` output (including bash's `$'...'` form) is decoded back to the
+  exact value. Previously only quote characters were stripped, and the value
+  was re-quoted on top, so the next call landed in the wrong directory.
+- The live `bash_run` tests declare an explicit bare execution floor, so they
+  pass under the sandbox-required default.
 - The e2e session context selects the offline `web_search` provider, so
   scenarios load again when more than one `web_search` tool is installed.
 

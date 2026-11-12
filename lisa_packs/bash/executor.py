@@ -420,12 +420,86 @@ def _scan_rc_marker(line: str, sentinel: str, scan: _MarkerScan) -> bool:
     return True
 
 
+_ANSI_C_SIMPLE = {
+    "a": 0x07,
+    "b": 0x08,
+    "e": 0x1B,
+    "E": 0x1B,
+    "f": 0x0C,
+    "n": 0x0A,
+    "r": 0x0D,
+    "t": 0x09,
+    "v": 0x0B,
+    "\\": 0x5C,
+    "'": 0x27,
+    '"': 0x22,
+    "?": 0x3F,
+}
+_ANSI_C_NUMERIC = {"x": (16, 2), "u": (16, 4), "U": (16, 8)}
+
+
+def _decode_ansi_c(body: str) -> str:
+    """Decode the inside of a bash ``$'...'`` ANSI-C quoted string."""
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out += ch.encode("utf-8")
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in _ANSI_C_SIMPLE:
+            out.append(_ANSI_C_SIMPLE[nxt])
+            i += 2
+        elif nxt in "01234567":
+            end = i + 2
+            while end < min(i + 4, len(body)) and body[end] in "01234567":
+                end += 1
+            out.append(int(body[i + 1 : end], 8) & 0xFF)
+            i = end
+        elif nxt in _ANSI_C_NUMERIC:
+            base, width = _ANSI_C_NUMERIC[nxt]
+            digits = re.match(rf"[0-9A-Fa-f]{{1,{width}}}", body[i + 2 :])
+            if digits is None:
+                out += f"\\{nxt}".encode()
+                i += 2
+                continue
+            value = int(digits.group(), base)
+            out += bytes([value]) if nxt == "x" else chr(value).encode("utf-8")
+            i += 2 + len(digits.group())
+        elif nxt == "c" and i + 2 < len(body):
+            out.append(ord(body[i + 2]) & 0x1F)
+            i += 3
+        else:
+            out += f"\\{nxt}".encode()
+            i += 2
+    return out.decode("utf-8", errors="replace")
+
+
+def _unquote_printf_q(token: str) -> str:
+    """Invert bash ``printf %q`` so the host stores the real string.
+
+    Bash emits a backslash-escaped bare word, ``''`` for the empty string, or
+    ``$'...'`` ANSI-C quoting when the value holds control characters. The
+    host re-quotes with :func:`shlex.quote` when replaying state, so leaving
+    the shell escaping in place would double-escape the value.
+    """
+    if len(token) >= len("$''") and token.startswith("$'") and token.endswith("'"):
+        return _decode_ansi_c(token[2:-1])
+    try:
+        parts = shlex.split(token)
+    except ValueError:
+        return token
+    return parts[0] if len(parts) == 1 else token
+
+
 def _scan_state_marker(line: str, sentinel: str, scan: _MarkerScan) -> bool:
     """Fold a ``state=cwd=...`` marker into ``scan``."""
     match = _STATE_CWD.match(line)
     if match is None or sentinel not in match.group("sentinel"):
         return False
-    scan.cwd = match.group("cwd").strip("'\"")
+    scan.cwd = _unquote_printf_q(match.group("cwd").rstrip("\r"))
     return True
 
 
@@ -434,9 +508,7 @@ def _scan_var_marker(line: str, sentinel: str, scan: _MarkerScan) -> bool:
     match = _STATE_VAR.match(line)
     if match is None or sentinel not in match.group("sentinel"):
         return False
-    value = match.group("value").strip()
-    # printf %q emits a bare token unless quoting is needed.
-    scan.exported[match.group("name")] = value.strip("'\"")
+    scan.exported[match.group("name")] = _unquote_printf_q(match.group("value").rstrip("\r"))
     return True
 
 

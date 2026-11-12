@@ -128,10 +128,7 @@ def test_batches_are_turn_scoped_and_background_jobs_make_no_claims() -> None:
     assert mixed == {"scope": "turn", "invalidates": [OBSERVATION_PREFIX]}
     # Background jobs keep their descriptor resident; a writer still stales observations.
     writer = {"invalidates": [OBSERVATION_PREFIX]}
-    assert (
-        history_keys({"command": "make", "run_in_background": True}, _result())
-        == writer
-    )
+    assert history_keys({"command": "make", "run_in_background": True}, _result()) == writer
     assert history_keys({"command": "make"}, _result(backgrounded=True)) == writer
     tail = {"command": "tail -f log", "run_in_background": True}
     assert history_keys(tail, _result()) is None
@@ -177,17 +174,13 @@ async def test_snapshot_and_anchor_read_the_live_session(
     assert result.error == "", result.error
 
     snapshot = await history_snapshot(ctx, [])
-    assert snapshot == (
-        f"bash session: cwd={workdir}; sandboxed=false; running jobs=none"
-    )
+    assert snapshot == (f"bash session: cwd={workdir}; sandboxed=false; running jobs=none")
 
     (session,) = _SESSIONS.values()
     session.jobs_dir.mkdir(parents=True, exist_ok=True)
     spill = session.jobs_dir / "stdout-abc.log"
     spill.write_text("full output\n", encoding="utf-8")
-    assert (
-        await resolve_history_anchor(ctx, f"bash_run:file:{spill}") == "full output\n"
-    )
+    assert await resolve_history_anchor(ctx, f"bash_run:file:{spill}") == "full output\n"
     outside = tmp_path / "secret.txt"
     outside.write_text("nope", encoding="utf-8")
     assert await resolve_history_anchor(ctx, f"bash_run:file:{outside}") is None

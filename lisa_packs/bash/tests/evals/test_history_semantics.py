@@ -46,9 +46,7 @@ def catalog() -> dict[str, dict[str, object]]:
 class _Driver:
     """Run real bash_run calls and record their claims like the turn runner."""
 
-    def __init__(
-        self, catalog: dict[str, dict[str, object]], factory: ToolContextFactory
-    ) -> None:
+    def __init__(self, catalog: dict[str, dict[str, object]], factory: ToolContextFactory) -> None:
         self.catalog = catalog
         self.factory = factory
         self.ledger = HistoryLedger()
