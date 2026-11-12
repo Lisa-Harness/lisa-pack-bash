@@ -159,6 +159,34 @@ as a `results` list plus aggregate `return_code`, with `batch: true`,
 `when`, and `requested_when` recorded. Use in-shell `&` / `wait` /
 `xargs -P` for data-parallel work *within* one command instead.
 
+### History semantics (what goes stale)
+
+`bash_run` tells the kernel which of its results go stale, so stale output
+folds to a one-line stub with a `r<sha256>` ref instead of riding along in
+every later request (see `lisa_packs/bash/history.py`):
+
+- **Observations** — single commands whose every pipe stage is a known
+  read-only program (`ls`, `cat`, `grep`, `rg`, `find` without
+  `-delete`/`-exec`, `git status`/`diff`/`log`/`show`, …), with no option
+  that writes or runs a program (bundled short options and abbreviated long
+  options included, e.g. `sort -uo`, `sort --out=`), and that use no
+  redirection, `;`, `&&`, `||`, `&`, or command substitution — are keyed by
+  layer and normalized command. Re-running the same observation supersedes
+  the earlier result.
+- **Everything else** (any mutation, `cd`, timed-out commands, batches) is
+  turn-scoped: it folds when the turn ends. A non-observation also
+  invalidates every resident observation, since it may have changed what
+  they saw. A background launch keeps its job descriptor resident; if the
+  job is not an observation it still invalidates resident observations.
+- **Snapshot** — when anything folds, the turn-end snapshot keeps the
+  session's live state resident: `cwd`, sandbox posture, and running jobs.
+- **Anchors** — an observation whose stdout spilled to the session's jobs
+  directory is re-read from that file on dereference; any other anchor
+  falls back to the stored ref.
+
+The shell mode sets `working_set_tokens: 48000`, so aged history folds
+mid-turn before the live array grows past that.
+
 ## Background jobs
 
 - Set `run_in_background: true` for long-running work; the result is

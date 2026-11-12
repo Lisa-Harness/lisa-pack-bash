@@ -24,6 +24,8 @@ satisfies_intents: [shell, terminal]
 # explicit binding (bound by sandbox_facts' shared shell surface).
 allowed_tool_ids: [bash_run]
 pre_turn_operation_ids: [sandbox_facts]
+# Soft-epoch trigger cap: fold aged history before the live array grows past this.
+working_set_tokens: 48000
 ---
 
 # Shell Mode

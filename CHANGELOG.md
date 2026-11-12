@@ -2,6 +2,30 @@
 
 All notable changes to the Lisa bash pack are documented here.
 
+## [Unreleased]
+
+### Added
+
+#### `bash_run` declares history semantics
+
+- **What:** `bash_run.tool.yml` declares `history: {hook: true, snapshot:
+  true}`, backed by `lisa_packs/bash/history.py`. Read-only observations are
+  keyed by layer and normalized command, so a rerun supersedes the earlier
+  result. Anything else is turn-scoped and invalidates resident
+  observations. A turn-end snapshot keeps the cwd, sandbox posture, and
+  running jobs resident, and spilled stdout is re-read through the anchor
+  resolver. The shell mode sets `working_set_tokens: 48000`.
+- **Why:** stale shell output rode along in every later request. The kernel
+  can now fold it to a ref-carrying stub, without the pack losing track of
+  where the shell is.
+- **Tests:** classifier and hook unit tests, a packstest eval over a live
+  session, and the `bash/history-fold-scripted` e2e scenario.
+
+### Fixed
+
+- The e2e session context selects the offline `web_search` provider, so
+  scenarios load again when more than one `web_search` tool is installed.
+
 ## [0.1.1]
 
 ### Fixed

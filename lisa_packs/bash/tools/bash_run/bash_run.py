@@ -16,6 +16,11 @@ from lisa_packs.bash.executor import (
     run_batch_in_session,
     run_in_session,
 )
+from lisa_packs.bash.history import (  # noqa: F401  # kernel history hooks
+    history_keys,
+    history_snapshot,
+    resolve_history_anchor,
+)
 from lisa_packs.bash.session import (
     BashSession,
     SandboxRequiredButUnavailable,

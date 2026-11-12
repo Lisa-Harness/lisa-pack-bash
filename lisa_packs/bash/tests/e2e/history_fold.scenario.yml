@@ -1,0 +1,36 @@
+# Deterministic, token-free check of bash_run's history semantics: the model
+# lists the workspace twice (the rerun supersedes the first listing), reads a
+# file, mutates the tree (invalidating every resident observation), and lists
+# again. The thread entry must carry refd history records for the stale
+# observations plus the pack's turn-end session snapshot. The model is
+# model/history_fold.py, not an LLM.
+# Run: uv run --frozen lisa-e2e run <this file>   (from the lisa framework checkout)
+id: bash/history-fold-scripted
+session_context: session_context_history.md
+fixture:
+  repo: fixtures/notes
+model:
+  script: model/history_fold.py
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - /shell list the workspace, read notes.txt, then add a marker file
+approvals:
+  approve: ["*"]
+budgets:
+  max_messages: 4
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 300
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_runtime_errors: {}
+  history:
+    # cd + touch (turn-scoped), ls (superseded), ls + cat (invalidated), ls (live
+    # but recorded): every call has a refd record.
+    - history_folded: {tool: bash_run, min: 6, snapshot: lisa-pack-bash}

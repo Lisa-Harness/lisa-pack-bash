@@ -18,3 +18,8 @@ exportable: true
 # cancelling the adoption mid-flight), so the tool declares itself
 # self-bounding instead of picking a magic number.
 timeout_seconds: 0
+# History semantics (kernel.history): lisa_packs.bash.history classifies
+# observation commands; reruns supersede, anything else invalidates them.
+history:
+  hook: true
+  snapshot: true
